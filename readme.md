@@ -11,6 +11,22 @@
 
 ### build from source
 
+#### dependencies
+
+#### fedora
+
+```bash
+sudo dnf install \
+  cairo-gobject-devel \
+  javascriptcoregtk4.0-devel \
+  libsoup-devel \
+  rust-gdk-devel \
+  rust-gdk-pixbuf-devel \
+  rust-libsystemd-devel \
+  rust-pango-devel \
+  webkit2gtk4.0-devel
+```
+
 #### .deb distros
 
 ```bash
