@@ -1,0 +1,18 @@
+[Unit]
+Description=cichlid threat detection
+Wants=network-online.target
+After=network-online.target
+AssertPathExists=/usr/bin/cichlid
+AssertPathExists=/etc/cichlid.yml
+
+[Service]
+User=cichlid
+Group=cichlid
+WorkingDirectory=/var/lib/cichlid
+ExecStart=/usr/bin/cichlid
+Restart=always
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

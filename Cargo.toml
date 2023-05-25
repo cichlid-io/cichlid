@@ -1,0 +1,25 @@
+[package]
+name = "cichlid"
+version = "0.0.1"
+authors = ["rob thijssen <rob@cichlid.io>"]
+edition = "2021"
+
+[package.metadata.deb]
+depends = "$auto, systemd"
+extended-description = "threat detection and threat information sharing"
+section = "admin"
+priority = "optional"
+assets = [
+  [
+    "target/release/cichlid",
+    "usr/bin/cichlid",
+    "755"
+  ],
+  [
+    "debian/cichlid.service",
+    "/lib/systemd/system/cichlid.service",
+    "644"
+  ],
+]
+
+[dependencies]
