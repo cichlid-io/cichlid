@@ -41,7 +41,7 @@ async fn main() {
       --output-fields _SOURCE_REALTIME_TIMESTAMP,MESSAGE,PRIORITY
     */
     let q = JournalQuery {
-        fields: vec![journal_fields::SOURCE_REALTIME_TIMESTAMP.to_string(), "MESSAGE".to_string()],
+        fields: vec![journal_fields::SOURCE_REALTIME_TIMESTAMP.to_string(), journal_fields::MESSAGE.to_string()],
         services: vec!["ssh.service".to_string()],
         limit: 0,
         priority: 5,
