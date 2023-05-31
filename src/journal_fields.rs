@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// message id
 pub const MESSAGE_ID: &str = "MESSAGE_ID";
 /// human-readable message string for this entry

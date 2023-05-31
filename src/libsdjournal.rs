@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::libsdjournal_bindings;
 use libc::{c_char, c_void, size_t};
 use serde::Serialize;

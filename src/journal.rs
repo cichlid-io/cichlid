@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::boot::Boot;
 use crate::journal_entries::JournalEntries;
 use crate::journal_entries::JournalEntry;
