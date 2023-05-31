@@ -64,11 +64,6 @@ impl QueryBuilder {
         self
     }
 
-    pub fn with_pid(&mut self, pid: u32) -> &mut Self {
-        self.query.pid = pid;
-        self
-    }
-
     pub fn with_limit(&mut self, limit: u64) -> &mut Self {
         self.query.limit = limit;
         self
@@ -106,11 +101,6 @@ impl QueryBuilder {
 
     pub fn with_units(&mut self, units: Vec<String>) -> &mut Self {
         self.query.units = units;
-        self
-    }
-
-    pub fn within_slice(&mut self, slice: &str) -> &mut Self {
-        self.query.slice = String::from(slice);
         self
     }
 

@@ -11,67 +11,75 @@ mod unit;
 #[macro_use]
 extern crate log;
 
-use boot::Boot;
-use chrono::{
-    DateTime,
-    Duration,
-    Utc,
-};
+use chrono::DateTime;
 use crate::query_builder::QueryBuilder;
 use journal::{
     Journal,
     OpenFlags,
 };
-use journal_entries::{
-    JournalEntries,
-    JournalEntry,
-};
+use journal_entries::JournalEntries;
 use libsdjournal::JournalError;
 use regex::Regex;
 use serde::Deserialize;
-use unit::Unit;
 
 #[tokio::main]
 async fn main() {
-    /*
-    journalctl \
-      -u ssh \
-      -g 'authentication failure' \
-      --output json \
-      --output-fields _SOURCE_REALTIME_TIMESTAMP,MESSAGE,PRIORITY
-    */
-    let q = JournalQuery {
-        fields: vec![journal_fields::SOURCE_REALTIME_TIMESTAMP.to_string(), journal_fields::MESSAGE.to_string()],
-        services: vec!["ssh.service".to_string()],
-        limit: 0,
-        priority: 5,
-        quick_search: "authentication failure".to_string(),
-        reset_position: true,
-        transports: vec!["syslog".to_string()],
-        datetime_from: "".to_string(),
-        datetime_to: "".to_string(),
-        boot_ids: vec![],
-    };
-    let re: Regex = Regex::new(r#"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"#).unwrap();
+    let threats = vec!["scan", "ssh"];
+    let ports_regex: Regex = Regex::new(r#"ports ([\d,\s]+),\s\.\.\.,"#).unwrap();
+    let ip_regex: Regex = Regex::new(r#"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"#).unwrap();
     let mut attacks: Vec<Attack> = Vec::new();
-    match get_logs(q).await {
-        Ok(entries) => {
-            for row in entries.rows {
-                let attack = Attack {
-                    source_ip: match re.find(&row[1]) {
-                        Some(ip) => ip.as_str().to_string(),
-                        _ => "".to_string(),
-                    },
-                    timestamp: row[0].parse::<u64>().unwrap_or(0),
-                    target_port: 22,
-                    note: "ssh auth failure".to_string(),
-                };
-                println!("{} {} {} {}", attack.timestamp, attack.target_port, attack.source_ip, attack.note);
-                attacks.push(attack);
-            }
-            println!("{} threat sources observed", attacks.len());
-        },
-        journal_error => {},
+    for threat in threats {
+        match get_logs(match threat {
+            "scan" => JournalQuery::new("scanlogd.service", "tos"),
+            "ssh" => JournalQuery::new("ssh.service", "authentication failure"),
+            _ => JournalQuery::new("scanlogd.service", "tos"),
+        }).await {
+            Ok(entries) => {
+                for row in entries.rows {
+                    match threat {
+                        "scan" => {
+                            //journalctl -u scanlogd -g 'tos' --output json --output-fields MESSAGE,_SOURCE_REALTIME_TIMESTAMP,_HOSTNAME
+                            let ports: Vec<u32> = ports_regex.captures(&row[1]).unwrap()
+                              .get(1).map_or("", |m| m.as_str())
+                              .split(", ").map(|s| s.parse::<u32>().unwrap()).collect();
+                            let ip = match ip_regex.find(&row[1]) {
+                                Some(x) => x.as_str(),
+                                _ => "",
+                            };
+                            for port in ports {
+                                let attack = Attack {
+                                    source_ip: ip.to_string(),
+                                    timestamp: row[0].parse::<u64>().unwrap_or(0),
+                                    target_port: port,
+                                    threat: threat.to_string(),
+                                };
+                                //println!("{} {} {} {}", attack.timestamp, attack.target_port, attack.source_ip, attack.note);
+                                attacks.push(attack);
+                            }
+                        },
+                        "ssh" => {
+                            //journalctl -u ssh.service -g 'authentication failure' --output json --output-fields MESSAGE,_SOURCE_REALTIME_TIMESTAMP,_HOSTNAME
+                            let attack = Attack {
+                                source_ip: match ip_regex.find(&row[1]) {
+                                    Some(ip) => ip.as_str().to_string(),
+                                    _ => "".to_string(),
+                                },
+                                timestamp: row[0].parse::<u64>().unwrap_or(0),
+                                target_port: 22,
+                                threat: threat.to_string(),
+                            };
+                            //println!("{} {} {} {}", attack.timestamp, attack.target_port, attack.source_ip, attack.note);
+                            attacks.push(attack);
+                        },
+                        _ => {}
+                    }
+                }
+            },
+            journal_error => {
+                println!("{:#?}", journal_error);
+            },
+        }
+        println!("{} {} attacks observed", attacks.iter().filter(|&n| *n.threat == threat.to_string()).count(), threat);
     }
 }
 
@@ -80,7 +88,7 @@ async fn main() {
 struct Attack {
     source_ip: String,
     target_port: u32,
-    note: String,
+    threat: String,
     timestamp: u64,
 }
 
@@ -99,10 +107,21 @@ struct JournalQuery {
     boot_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SummaryQuery {
-    priority: u32,
+impl JournalQuery {
+    fn new(service: &str, grep: &str) -> Self {
+        JournalQuery {
+            services: vec![service.to_string()],
+            quick_search: grep.to_string(),
+            fields: vec![journal_fields::SOURCE_REALTIME_TIMESTAMP.to_string(), journal_fields::MESSAGE.to_string()],
+            limit: 0,
+            priority: 0,
+            reset_position: true,
+            transports: vec![],
+            datetime_from: "".to_string(),
+            datetime_to: "".to_string(),
+            boot_ids: vec![],
+        }
+    }
 }
 
 async fn get_logs(query: JournalQuery) -> Result<JournalEntries, JournalError> {
@@ -131,70 +150,10 @@ async fn get_logs(query: JournalQuery) -> Result<JournalEntries, JournalError> {
     }
 
     let q = q.build();
-
-    let j = Journal::open(
-        OpenFlags::SD_JOURNAL_LOCAL_ONLY
-            | OpenFlags::SD_JOURNAL_SYSTEM,
-    ).unwrap();
+    let j = Journal::open(OpenFlags::SD_JOURNAL_LOCAL_ONLY | OpenFlags::SD_JOURNAL_SYSTEM).unwrap();
     //let lock = j.lock().await;
     let logs = j.query_logs(&q)?;
     debug!("found {} entries.", logs.rows.len());
 
     Ok(logs)
-}
-
-#[tauri::command]
-async fn get_full_entry(timestamp: u64) -> Result<JournalEntry, JournalError> {
-    debug!("get_full_entry(timestamp: {})", timestamp);
-
-    let j = Journal::open(
-        OpenFlags::SD_JOURNAL_LOCAL_ONLY
-            | OpenFlags::SD_JOURNAL_SYSTEM
-            | OpenFlags::SD_JOURNAL_CURRENT_USER,
-    ).unwrap();
-    let entry = j.get_full_entry(timestamp)?;
-
-    debug!("Found entry for timestamp {}", timestamp);
-
-    Ok(entry)
-}
-
-async fn get_summary(query: SummaryQuery) -> Result<JournalEntries, JournalError> {
-    debug!("Getting summary...");
-    let j = Journal::open(
-        OpenFlags::SD_JOURNAL_LOCAL_ONLY
-            | OpenFlags::SD_JOURNAL_SYSTEM
-            | OpenFlags::SD_JOURNAL_CURRENT_USER,
-    )
-    .unwrap();
-
-    let datetime_to = Utc::now() - Duration::days(1);
-    let mut qb = QueryBuilder::default();
-    let q = qb
-        .with_fields(vec!["__REALTIME".into()])
-        .with_limit(10_000)
-        .with_date_not_older_than(datetime_to.timestamp_micros() as u64)
-        .with_priority_above_or_equal_to(query.priority)
-        .build();
-
-    let logs = j.query_logs(&q)?;
-    debug!("Found {} entries.", logs.rows.len());
-
-    Ok(logs)
-}
-
-async fn get_services() -> Result<Vec<Unit>, JournalError> {
-    debug!("Getting services...");
-    let services = Journal::list_services();
-    debug!("found {} services", services.len());
-
-    Ok(services)
-}
-
-async fn get_boots() -> Result<Vec<Boot>, JournalError> {
-    debug!("Getting boots...");
-    let boots = Journal::list_boots();
-    debug!("found {} boots", boots.len());
-
-    Ok(boots)
 }

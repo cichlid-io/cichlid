@@ -193,10 +193,12 @@ impl Journal {
     }
 
     fn apply_minimum_priority(&self, q: &Query) {
-        for p in 0..=q.minimum_priority {
-            let query = format!("{}={}", journal_fields::PRIORITY, p);
-            if let Err(e) = sd_journal_add_match(self.ptr, query) {
-                warn!("Could not apply filter {}", e);
+        if q.minimum_priority > 0 {
+            for p in 0..=q.minimum_priority {
+                let query = format!("{}={}", journal_fields::PRIORITY, p);
+                if let Err(e) = sd_journal_add_match(self.ptr, query) {
+                    warn!("Could not apply filter {}", e);
+                }
             }
         }
     }

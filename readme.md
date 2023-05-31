@@ -31,6 +31,7 @@ sudo dnf install \
 
 ```bash
 sudo apt-get install \
+  librust-gdk-pixbuf-dev \
   libwebkit2gtk-4.0-dev
 ```
 
