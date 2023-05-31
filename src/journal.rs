@@ -267,7 +267,7 @@ impl Journal {
 
 impl Drop for Journal {
     fn drop(&mut self) {
-        warn!("Dropping the journal");
+        debug!("closing journal");
         sd_journal_close(self.ptr);
     }
 }

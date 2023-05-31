@@ -11,7 +11,14 @@ mod unit;
 #[macro_use]
 extern crate log;
 
-use chrono::DateTime;
+#[macro_use]
+extern crate rocket;
+
+use chrono::{
+    DateTime,
+    Duration,
+    Utc,
+};
 use crate::query_builder::QueryBuilder;
 use journal::{
     Journal,
@@ -20,18 +27,46 @@ use journal::{
 use journal_entries::JournalEntries;
 use libsdjournal::JournalError;
 use regex::Regex;
-use serde::Deserialize;
+use rocket::serde::json::{json, Value};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
+
+#[get("/attacks/<since>")]
+async fn attacks(since: String) -> Value {
+    match DateTime::parse_from_rfc3339(&since).ok() {
+        Some(date_since) => match get_attacks(date_since.into(), Utc::now()).await {
+            Ok(result) => json!(result),
+            _ => json!({ "error": "journal lookup failure" })
+        },
+        _ => json!({ "error": "date parse failure" })
+    }
+}
+
+#[launch]
+fn rocket() -> _ {
+    rocket::build()
+        .mount("/", routes![attacks])
+}
+
+/*
 #[tokio::main]
 async fn main() {
+    // todo: make 'from' configurable
+    get_attacks(Utc::now() - Duration::hours(24), Utc::now()).await;
+}
+*/
+async fn get_attacks(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Attack>, JournalError> {
     let threats = vec!["scan", "ssh"];
     let ports_regex: Regex = Regex::new(r#"ports ([\d,\s]+),\s\.\.\.,"#).unwrap();
     let ip_regex: Regex = Regex::new(r#"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"#).unwrap();
     let mut attacks: Vec<Attack> = Vec::new();
     for threat in threats {
         let journal_query_or_error = match threat {
-            "scan" => Ok(JournalQuery::new("scanlogd.service", "tos")),
-            "ssh" => Ok(JournalQuery::new("ssh.service", "authentication failure")),
+            "scan" => Ok(JournalQuery::new("scanlogd.service", "tos", from, to)),
+            "ssh" => Ok(JournalQuery::new("ssh.service", "authentication failure", from, to)),
             _ => Err("unrecognised threat"),
         };
         match journal_query_or_error {
@@ -76,18 +111,18 @@ async fn main() {
                             }
                         }
                     },
-                    journal_error => {
-                        println!("{:#?}", journal_error);
-                    },
+                    _ => (),
                 }
-                println!("{} {} attacks observed", attacks.iter().filter(|&n| *n.threat == threat.to_string()).count(), threat);
+                println!("{} {} attacks observed between {} and {}", attacks.iter().filter(|&n| *n.threat == threat.to_string()).count(), threat, from, to);
             },
             _ => {},
         }
     }
+
+    Ok(attacks)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Attack {
     source_ip: String,
@@ -106,13 +141,13 @@ struct JournalQuery {
     reset_position: bool,
     services: Vec<String>,
     transports: Vec<String>,
-    datetime_from: String,
-    datetime_to: String,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
     boot_ids: Vec<String>,
 }
 
 impl JournalQuery {
-    fn new(service: &str, grep: &str) -> Self {
+    fn new(service: &str, grep: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> Self {
         JournalQuery {
             services: vec![service.to_string()],
             quick_search: grep.to_string(),
@@ -121,8 +156,8 @@ impl JournalQuery {
             priority: 0,
             reset_position: true,
             transports: vec![],
-            datetime_from: "".to_string(),
-            datetime_to: "".to_string(),
+            from: from,
+            to: to,
             boot_ids: vec![],
         }
     }
@@ -140,18 +175,9 @@ async fn get_logs(query: JournalQuery) -> Result<JournalEntries, JournalError> {
         .with_priority_above_or_equal_to(query.priority)
         .with_units(query.services)
         .with_transports(query.transports)
-        .with_boot_ids(query.boot_ids);
-
-    let date_from = DateTime::parse_from_rfc3339(&query.datetime_from).ok();
-    let date_to = DateTime::parse_from_rfc3339(&query.datetime_to).ok();
-
-    if let Some(x) = date_from {
-        q.with_date_not_more_recent_than(x.timestamp_micros() as u64);
-    }
-
-    if let Some(x) = date_to {
-        q.with_date_not_older_than(x.timestamp_micros() as u64);
-    }
+        .with_boot_ids(query.boot_ids)
+        .with_date_not_more_recent_than(query.to.timestamp_micros() as u64)
+        .with_date_not_older_than(query.from.timestamp_micros() as u64);
 
     let q = q.build();
     let j = Journal::open(OpenFlags::SD_JOURNAL_LOCAL_ONLY | OpenFlags::SD_JOURNAL_SYSTEM).unwrap();
