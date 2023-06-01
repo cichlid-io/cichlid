@@ -47,8 +47,7 @@ async fn attacks(since: String) -> Value {
 
 #[launch]
 fn rocket() -> _ {
-    rocket::build()
-        .mount("/", routes![attacks])
+    rocket::build().mount("/", routes![attacks])
 }
 
 /*

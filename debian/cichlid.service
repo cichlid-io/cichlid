@@ -3,12 +3,13 @@ Description=cichlid threat detection
 Wants=network-online.target
 After=network-online.target
 AssertPathExists=/usr/bin/cichlid
-AssertPathExists=/etc/cichlid.yml
+AssertPathExists=/etc/letsencrypt/live/%H/fullchain.pem
+AssertPathExists=/etc/letsencrypt/live/%H/privkey.pem
 
 [Service]
-User=cichlid
-Group=cichlid
-WorkingDirectory=/var/lib/cichlid
+Environment=ROCKET_PORT=2798
+Environment=ROCKET_ADDRESS=0.0.0.0
+Environment=ROCKET_TLS={certs=/etc/letsencrypt/live/%H/fullchain.pem,key=/etc/letsencrypt/live/%H/privkey.pem}
 ExecStart=/usr/bin/cichlid
 Restart=always
 NoNewPrivileges=true
