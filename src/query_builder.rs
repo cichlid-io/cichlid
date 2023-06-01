@@ -1,6 +1,8 @@
 use std::mem;
-
-use crate::{journal_fields, query::Query};
+use crate::{
+    journal_fields,
+    query::Query
+};
 
 pub struct QueryBuilder {
     query: Query,

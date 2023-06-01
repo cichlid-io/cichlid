@@ -1,7 +1,9 @@
+mod attack;
 mod boot;
 mod journal;
 mod journal_entries;
 mod journal_fields;
+mod journal_query;
 mod libsdjournal;
 mod libsdjournal_bindings;
 mod query;
@@ -9,30 +11,27 @@ mod query_builder;
 mod unit;
 
 #[macro_use]
-extern crate log;
-
-#[macro_use]
 extern crate rocket;
 
-use chrono::{
-    DateTime,
-    Duration,
-    Utc,
-};
-use crate::query_builder::QueryBuilder;
+use attack::Attack;
 use journal::{
     Journal,
     OpenFlags,
 };
 use journal_entries::JournalEntries;
+use journal_query::JournalQuery;
 use libsdjournal::JournalError;
-use regex::Regex;
-use rocket::serde::json::{json, Value};
-use serde::{
-    Deserialize,
-    Serialize,
-};
+use query_builder::QueryBuilder;
 
+use chrono::{
+    DateTime,
+    Utc,
+};
+use regex::Regex;
+use rocket::serde::json::{
+    json,
+    Value
+};
 
 #[get("/attacks/<since>")]
 async fn attacks(since: String) -> Value {
@@ -50,13 +49,6 @@ fn rocket() -> _ {
     rocket::build().mount("/", routes![attacks])
 }
 
-/*
-#[tokio::main]
-async fn main() {
-    // todo: make 'from' configurable
-    get_attacks(Utc::now() - Duration::hours(24), Utc::now()).await;
-}
-*/
 async fn get_attacks(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Attack>, JournalError> {
     let threats = vec!["scan", "ssh"];
     let ports_regex: Regex = Regex::new(r#"ports ([\d,\s]+),\s\.\.\.,"#).unwrap();
@@ -119,47 +111,6 @@ async fn get_attacks(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Attac
     }
 
     Ok(attacks)
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Attack {
-    source_ip: String,
-    target_port: u32,
-    threat: String,
-    timestamp: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JournalQuery {
-    fields: Vec<String>,
-    priority: u32,
-    limit: u64,
-    quick_search: String,
-    reset_position: bool,
-    services: Vec<String>,
-    transports: Vec<String>,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-    boot_ids: Vec<String>,
-}
-
-impl JournalQuery {
-    fn new(service: &str, grep: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> Self {
-        JournalQuery {
-            services: vec![service.to_string()],
-            quick_search: grep.to_string(),
-            fields: vec![journal_fields::SOURCE_REALTIME_TIMESTAMP.to_string(), journal_fields::MESSAGE.to_string()],
-            limit: 0,
-            priority: 0,
-            reset_position: true,
-            transports: vec![],
-            from: from,
-            to: to,
-            boot_ids: vec![],
-        }
-    }
 }
 
 async fn get_logs(query: JournalQuery) -> Result<JournalEntries, JournalError> {
