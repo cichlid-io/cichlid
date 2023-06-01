@@ -8,6 +8,7 @@ mod libsdjournal;
 mod libsdjournal_bindings;
 mod query;
 mod query_builder;
+mod time_period;
 mod unit;
 
 #[macro_use]
