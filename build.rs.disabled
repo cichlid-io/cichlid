@@ -1,0 +1,27 @@
+use clap_complete::{generate_to, shells, Generator};
+use std::env;
+use std::fs;
+use std::path::Path;
+
+include!("src/main.rs"); // Adjust if Args/Command is in a different module
+
+fn main() {
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dest = Path::new(&out_dir);
+
+    let mut app = Args::command(); // Your clap root parser
+
+    generate_all(&mut app, "cichlid", dest);
+}
+
+fn generate_all<G: Generator>(cmd: &mut clap::Command, bin_name: &str, out_dir: &Path) {
+    for shell in [
+        shells::Bash,
+        shells::Zsh,
+        shells::Fish,
+        shells::PowerShell,
+        shells::Elvish,
+    ] {
+        generate_to(shell, cmd, bin_name, out_dir).unwrap();
+    }
+}

@@ -21,3 +21,10 @@ tokio-openssl = "0.6"
 # for streaming TLS connections
 async-stream = "0.3"
 futures-util = "0.3"
+
+# cert gen
+rcgen = "0.9"
+
+[build-dependencies]
+clap = { version = "4", features = ["cargo"] }
+clap_complete = "4"
