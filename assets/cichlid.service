@@ -1,0 +1,22 @@
+[Unit]
+Description=Server Manager Web and Worker Runtime
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/server_manager \
+    --cert-path /etc/server-manager/cert.pem \
+    --key-path /etc/server-manager/key.pem \
+    --host 0.0.0.0 \
+    --port 8443
+Restart=on-failure
+RestartSec=5s
+
+User=servermgr
+Group=servermgr
+
+# Optional: set working directory or environment
+WorkingDirectory=/var/lib/server-manager
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
