@@ -1,56 +1,84 @@
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration, sync::Arc};
-use tokio::{sync::Notify, task, time};
-use tracing::{info, trace};
-use hyper::{Client, Body};
+use hyper::{Body, Client};
 use hyper_openssl::HttpsConnector;
+use serde::{Deserialize, Serialize};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{sync::Notify, time};
+use tracing::{info, trace};
+use get_if_addrs::get_if_addrs;
 
-pub async fn run_workers(shutdown: Arc<Notify>, port: u16) {
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PeerRecord {
+    pub ip: String,
+    pub port: u16,
+    pub health: String, // raw JSON from /health
+    pub last_observed: i64,
+}
+
+pub async fn run_workers(shutdown: Arc<Notify>, port: u16, discovery_interval: u64) {
     info!("Worker runtime started");
 
+    // Open sled db for peers
+    let peer_db = sled::open("peers_db").expect("Failed to open sled DB");
+
     // Spawn network discovery worker
-    let discovery_shutdown = shutdown.clone();
+    let _build = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
+    let _version = env!("CARGO_PKG_VERSION");
 
-    let build = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
-    let version = env!("CARGO_PKG_VERSION");
-
-    let handle = task::spawn(async move {
-        // Only scan local IPv4 network for brevity (assume /24)
-        let our_ip = local_ip_address::local_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
-        let base = match our_ip.parse::<Ipv4Addr>() {
-            Ok(ip) => Ipv4Addr::new(ip.octets()[0], ip.octets()[1], ip.octets()[2], 0),
-            Err(_) => Ipv4Addr::new(127, 0, 0, 0),
-        };
-        let mut tasks = vec![];
-
-        for i in 1u8..=254 {
-            let shutdown = discovery_shutdown.clone();
-            let target = Ipv4Addr::new(base.octets()[0], base.octets()[1], base.octets()[2], i);
-
-            // Avoid self
-            if our_ip == target.to_string() {
-                continue;
-            }
-
-            let addr = SocketAddr::new(IpAddr::V4(target), port);
-            tasks.push(tokio::spawn(discover_cichlid(addr, version, build, shutdown.clone())));
-        }
-
-        futures_util::future::join_all(tasks).await;
-    });
-
-    // Spawn dummy worker
-    let main_worker = task::spawn({
+    // Spawn peer discovery as a detached background task
+    tokio::spawn({
         let shutdown = shutdown.clone();
         async move {
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                        info!("Worker: performing background task...");
+                    _ = tokio::time::sleep(Duration::from_secs(discovery_interval)) => {
+                        info!("Worker: performing background peer discovery...");
+                        // Run peer discovery every cycle using get_if_addrs for subnet detection
+                        let mut peer_scan_tasks = Vec::new();
+                        match get_if_addrs() {
+                            Ok(addrs) => {
+                                for iface in addrs.into_iter() {
+                                    if let get_if_addrs::IfAddr::V4(ifv4) = iface.addr {
+                                        let ipv4 = ifv4.ip;
+                                        // Skip loopback networks (starting with 127)
+                                        if ipv4.octets()[0] == 127 {
+                                            continue;
+                                        }
+                                        let mask = ifv4.netmask;
+                                        let prefix_len = mask.octets()
+                                            .iter()
+                                            .map(|b| b.count_ones())
+                                            .sum::<u32>();
+                                        let base_u32 = u32::from_be_bytes(ipv4.octets()) & u32::from_be_bytes(mask.octets());
+                                        let host_bits = 32 - prefix_len;
+                                        let max_hosts = if host_bits > 0 { (1u32 << host_bits) - 2 } else { 0 };
+                                        info!(
+                                            "Peer discovery: interface {}  {}/{}  mask={} prefix={} scanning {} IPs",
+                                            iface.name, ipv4, prefix_len, mask, prefix_len, max_hosts
+                                        );
+                                        for i in 1..=max_hosts {
+                                            let candidate = base_u32 + i;
+                                            let candidate_ip = Ipv4Addr::from(candidate);
+                                            // Avoid self
+                                            if candidate_ip == ipv4 { continue; }
+                                            let addr = SocketAddr::new(IpAddr::V4(candidate_ip), port);
+                                            let peer_db = peer_db.clone();
+                                            peer_scan_tasks.push(tokio::spawn(discover_and_track_cichlid(addr, peer_db)));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                info!("if-addrs error: {}", e);
+                            }
+                        }
+                        futures_util::future::join_all(peer_scan_tasks).await;
                     }
                     _ = shutdown.notified() => {
-                        info!("Worker: shutdown signal received");
+                        info!("Worker: shutdown signal received (discovery)");
                         break;
                     }
                 }
@@ -58,12 +86,13 @@ pub async fn run_workers(shutdown: Arc<Notify>, port: u16) {
         }
     });
 
-    let _ = futures_util::future::join_all(vec![handle, main_worker]).await;
-
+    // Wait forever for shutdown so discovery runs continuously
+    shutdown.notified().await;
     info!("Worker runtime exited");
 }
 
-async fn discover_cichlid(addr: SocketAddr, _version: &str, _build: &str, _shutdown: Arc<Notify>) {
+async fn discover_and_track_cichlid(addr: SocketAddr, peer_db: sled::Db) {
+    info!("ping {}:{}", addr.ip(), addr.port());
     let url = format!("https://{}:{}/health", addr.ip(), addr.port());
     let https = match HttpsConnector::new() {
         Ok(conn) => conn,
@@ -79,12 +108,56 @@ async fn discover_cichlid(addr: SocketAddr, _version: &str, _build: &str, _shutd
         Err(_) => return,
     };
     let res = time::timeout(Duration::from_secs(2), client.request(req)).await;
+    let now = chrono::Utc::now().timestamp();
     match res {
-        Ok(Ok(resp)) => {
-            if resp.status().is_success() {
-                info!("Discovered cichlid at {}", addr.ip());
+        Ok(Ok(mut resp)) if resp.status().is_success() => {
+            let health_bytes = match hyper::body::to_bytes(resp.body_mut()).await {
+                Ok(b) => b,
+                Err(_) => {
+                    trace!("No response from {} (body read fail)", addr.ip());
+                    return;
+                }
+            };
+            let health_json: String = String::from_utf8_lossy(&health_bytes).to_string();
+            let key = format!("{}:{}", addr.ip(), addr.port());
+            let new_record = PeerRecord {
+                ip: addr.ip().to_string(),
+                port: addr.port(),
+                health: health_json.clone(),
+                last_observed: now,
+            };
+
+            let prev: Option<PeerRecord> = peer_db
+                .get(&key)
+                .ok()
+                .and_then(|iv| iv.and_then(|v| serde_json::from_slice(&v).ok()));
+            if let Some(mut prev_rec) = prev {
+                if prev_rec.health == new_record.health {
+                    prev_rec.last_observed = now;
+                    if let Ok(val) = serde_json::to_vec(&prev_rec) {
+                        let _ = peer_db.insert(&key, val);
+                    }
+                } else {
+                    if let Ok(val) = serde_json::to_vec(&new_record) {
+                        let _ = peer_db.insert(&key, val);
+                    }
+                    info!(
+                        "Discovered UPDATED cichlid at {}:{} -- new health: {}",
+                        addr.ip(),
+                        addr.port(),
+                        new_record.health
+                    );
+                }
             } else {
-                trace!("No response from {} (HTTP {})", addr.ip(), resp.status());
+                if let Ok(val) = serde_json::to_vec(&new_record) {
+                    let _ = peer_db.insert(&key, val);
+                }
+                info!(
+                    "Discovered NEW cichlid at {}:{} -- health: {}",
+                    addr.ip(),
+                    addr.port(),
+                    new_record.health
+                );
             }
         }
         _ => {

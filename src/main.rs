@@ -1,13 +1,13 @@
 mod certs;
 mod config_store;
 mod handlers;
+mod install;
 mod pq;
 mod select_stream_or_shutdown;
 mod server_loop;
 mod tls_accept_stream;
 mod types;
 mod workers;
-mod install;
 
 use crate::types::GenericBoxedStream;
 use clap::{Parser, Subcommand};
@@ -33,10 +33,17 @@ struct Args {
     cert_path: Option<PathBuf>,
     #[arg(long, help = "Path to TLS private key file")]
     key_path: Option<PathBuf>,
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "0.0.0.0")]
     host: String,
     #[arg(long, default_value = "29170")]
     port: u16,
+    /// Peer discovery interval in seconds
+    #[arg(
+        long,
+        default_value = "300",
+        help = "Peer discovery interval, in seconds"
+    )]
+    discovery_interval: u64,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -82,6 +89,16 @@ pub enum Command {
 
     /// List PQ algorithms supported by the linked OpenSSL+OQS provider
     ListPqAlgs,
+
+    /// Generate a cichlid self-signed CA certificate and private key (errors if file exists)
+    GenCa {
+        /// Path to write the CA certificate file
+        #[arg(long, help = "Path to CA certificate file")]
+        ca_cert_path: String,
+        /// Path to write the CA private key file
+        #[arg(long, help = "Path to CA private key file")]
+        ca_key_path: String,
+    },
     // More subcommands could be added here later
 }
 
@@ -111,16 +128,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             install::uninstall(*purge)?;
             return Ok(());
         }
-        Some(Command::GenCerts { cert_path, key_path }) => {
+        Some(Command::GenCerts {
+            cert_path,
+            key_path,
+        }) => {
             // reject --cert-path or --key-path if present
             if args.cert_path.is_some() || args.key_path.is_some() {
-                tracing::error!("Error: --cert-path and --key-path must not be used with 'gen-certs'");
+                tracing::error!(
+                    "Error: --cert-path and --key-path must not be used with 'gen-certs'"
+                );
                 std::process::exit(1);
             }
             certs::generate_self_signed_cert(cert_path.as_str(), key_path.as_str())?;
             tracing::info!(
                 "Certificates generated at:\n  cert: {}\n  key: {}",
-                cert_path, key_path
+                cert_path,
+                key_path
             );
             return Ok(());
         }
@@ -201,6 +224,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             return Ok(());
         }
+        Some(Command::GenCa { ca_cert_path, ca_key_path }) => {
+            use std::path::Path;
+            use openssl::rsa::Rsa;
+            use openssl::x509::X509NameBuilder;
+            use openssl::pkey::PKey;
+            use openssl::x509::X509Builder;
+            use openssl::asn1::Asn1Time;
+            use openssl::x509::extension::BasicConstraints;
+            use openssl::x509::extension::KeyUsage;
+
+            // Error if either file exists
+            if Path::new(&ca_cert_path).exists() || Path::new(&ca_key_path).exists() {
+                tracing::error!("CA cert or key already exists ({} or {}). Aborting.", ca_cert_path, ca_key_path);
+                std::process::exit(1);
+            }
+
+            // Generate RSA CA keypair
+            let rsa = Rsa::generate(4096).expect("Failed to generate RSA");
+            let pkey = PKey::from_rsa(rsa).expect("Failed to create CA PKey");
+
+            // Subject/issuer name
+            let mut name = X509NameBuilder::new().unwrap();
+            name.append_entry_by_text("CN", "cichlid-ca").unwrap();
+            let name = name.build();
+
+            // Build self-signed X509 cert
+            let mut builder = X509Builder::new().unwrap();
+            builder.set_version(2).unwrap();
+            builder.set_subject_name(&name).unwrap();
+            builder.set_issuer_name(&name).unwrap();
+            builder.set_pubkey(&pkey).unwrap();
+            builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+            builder.set_not_after(&Asn1Time::days_from_now(3650).unwrap()).unwrap(); // 10 years
+            let basic_constraints = BasicConstraints::new().critical().ca().build().unwrap();
+            builder.append_extension(basic_constraints).unwrap();
+            let key_usage = KeyUsage::new().key_cert_sign().crl_sign().build().unwrap();
+            builder.append_extension(key_usage).unwrap();
+            builder.sign(&pkey, openssl::hash::MessageDigest::sha256()).unwrap();
+            let ca_cert = builder.build();
+
+            // Write key and cert to files
+            std::fs::write(&ca_cert_path, ca_cert.to_pem().unwrap()).expect("Failed to write CA cert");
+            std::fs::write(&ca_key_path, pkey.private_key_to_pem_pkcs8().unwrap()).expect("Failed to write CA key");
+
+            tracing::info!(
+                "Generated cichlid CA:\n  cert: {}\n  key: {}",
+                ca_cert_path,
+                ca_key_path
+            );
+            return Ok(());
+        }
         None => {
             // require cert path
             let cert_path = args.cert_path.as_ref().unwrap_or_else(|| {
@@ -261,8 +335,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let worker_handle = tokio::spawn({
         let worker_shutdown_handle = shutdown_notify.clone();
         let worker_port = args.port;
+        let discovery_interval = args.discovery_interval;
         async move {
-            workers::run_workers(worker_shutdown_handle, worker_port).await;
+            workers::run_workers(worker_shutdown_handle, worker_port, discovery_interval).await;
         }
     });
 

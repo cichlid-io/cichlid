@@ -61,6 +61,34 @@ pub async fn route_request(
             }
         }
 
+        (&Method::GET, "/peers") => {
+            match sled::open("peers_db") {
+                Ok(db) => {
+                    let mut peers = vec![];
+                    for res in db.iter() {
+                        if let Ok((_, v)) = res {
+                            if let Ok(rec) = serde_json::from_slice::<crate::workers::PeerRecord>(&v) {
+                                peers.push(rec);
+                            }
+                        }
+                    }
+                    let json = serde_json::to_string(&peers).unwrap_or_else(|_| "[]".to_string());
+                    Ok(
+                        Response::builder()
+                            .header("Content-Type", "application/json")
+                            .body(Body::from(json))
+                            .unwrap(),
+                    )
+                }
+                Err(_) => Ok(
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("{\"error\": \"db not available\"}"))
+                        .unwrap(),
+                ),
+            }
+        }
+
         _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("{\"error\": \"not found\"}"))
