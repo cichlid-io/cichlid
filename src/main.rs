@@ -7,6 +7,7 @@ mod server_loop;
 mod tls_accept_stream;
 mod types;
 mod workers;
+mod install;
 
 use crate::types::GenericBoxedStream;
 use clap::{Parser, Subcommand};
@@ -34,7 +35,7 @@ struct Args {
     key_path: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
-    #[arg(long, default_value = "8443")]
+    #[arg(long, default_value = "29170")]
     port: u16,
 
     #[command(subcommand)]
@@ -44,17 +45,16 @@ struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Install cichlid systemd service and user
-    /// Install cichlid systemd service and user
     Install {
-        /// Overwrite service or certs if already present
-        #[arg(long, help = "Overwrite existing systemd service file and certs if they exist")]
+        /// Overwrite existing systemd service file and certs if they exist
+        #[arg(long)]
         overwrite: bool,
     },
 
     /// Uninstall cichlid: stop service, optionally remove all files and user
     Uninstall {
-        /// Remove all files and user, not just disable service
-        #[arg(long, help = "Remove system user, service, binary, and config")]
+        /// Remove system user, service, binary, and config
+        #[arg(long)]
         purge: bool,
     },
 
@@ -104,168 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match &args.command {
         Some(Command::Install { overwrite }) => {
-            use std::fs::{self, File};
-            use std::io::Write;
-            use std::process::Command;
-            use std::path::Path;
-            // Root check: If not EUID 0, print error and exit
-            if unsafe { libc::geteuid() } != 0 {
-                eprintln!("Install must be run as root (e.g., with sudo)");
-                std::process::exit(1);
-            }
-            // 1. Create system user cichlid
-            let output = Command::new("id").arg("-u").arg("cichlid").output();
-            if let Ok(out) = &output {
-                if !out.status.success() {
-                    // useradd if doesn't exist
-                    let status = Command::new("useradd")
-                        .args(&[
-                            "-r",
-                            "-m",
-                            "-d",
-                            "/var/lib/cichlid",
-                            "-G",
-                            "wheel",
-                            "cichlid",
-                        ])
-                        .status()
-                        .expect("failed to create user cichlid");
-                    if !status.success() {
-                        eprintln!("Failed to create cichlid user");
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                eprintln!("User lookup failed.");
-                std::process::exit(1);
-            }
-
-            // 2. Add passwordless sudo for cichlid under /etc/sudoers.d/cichlid
-            let sudoers_content = "cichlid ALL=(ALL) NOPASSWD:ALL\n";
-            let mut file = File::create("/etc/sudoers.d/cichlid")
-                .expect("Failed to write /etc/sudoers.d/cichlid -- need root?");
-            file.write_all(sudoers_content.as_bytes())
-                .expect("Failed to write sudoers line");
-            // set correct permissions
-            let _ = Command::new("chmod")
-                .args(&["0440", "/etc/sudoers.d/cichlid"])
-                .status();
-
-            // 3. Copy invoked binary to /usr/local/bin/cichlid if not exists or overwrite requested
-            let bin_dest = "/usr/local/bin/cichlid";
-            let exe_path = std::fs::read_link("/proc/self/exe")
-                .expect("Failed to determine running binary location");
-            if Path::new(bin_dest).exists() && !*overwrite {
-                eprintln!("Binary {} already exists. Use --overwrite to replace.", bin_dest);
-                std::process::exit(1);
-            }
-            // If overwrite requested AND service is active, stop it first
-            if *overwrite {
-                let status = Command::new("systemctl")
-                    .args(&["is-active", "--quiet", "cichlid.service"])
-                    .status();
-                if let Ok(st) = status {
-                    if st.success() {
-                        // Service is active, stop it
-                        let _ = Command::new("systemctl").args(&["stop", "cichlid.service"]).status();
-                    }
-                }
-            }
-            fs::copy(&exe_path, bin_dest)
-                .expect("Failed to copy binary to /usr/local/bin/cichlid -- need root?");
-
-            // 4. Make /etc/cichlid/cert and generate default cert/key
-            let cert_dir = "/etc/cichlid/cert";
-            let default_cert = "/etc/cichlid/cert/default-cert.pem";
-            let default_key = "/etc/cichlid/cert/default-key.pem";
-            if let Err(e) = fs::create_dir_all(cert_dir) {
-                eprintln!("Failed to create cert directory {}: {}", cert_dir, e);
-                std::process::exit(1);
-            }
-            let cert_exists = Path::new(default_cert).exists();
-            let key_exists = Path::new(default_key).exists();
-            if (cert_exists || key_exists) && !*overwrite {
-                eprintln!("Default cert or key already exists in {}. Use --overwrite to replace.", cert_dir);
-                std::process::exit(1);
-            }
-            match certs::generate_self_signed_cert(default_cert, default_key) {
-                Ok(_) => println!("Default cert and key generated at {}/", cert_dir),
-                Err(e) => {
-                    eprintln!("Failed to generate default TLS cert/key: {}", e);
-                    std::process::exit(1);
-                }
-            }
-
-            // 5. Create a systemd unit file referencing the cert/key
-            let systemd_unit = format!(
-                r#"[Unit]
-Description=Cichlid Service
-After=network.target
-
-[Service]
-User=cichlid
-ExecStart=/usr/local/bin/cichlid \
-    --cert-path {} \
-    --key-path {}
-WorkingDirectory=/var/lib/cichlid
-Restart=on-failure
-LimitNOFILE=4096
-
-[Install]
-WantedBy=multi-user.target
-"#,
-                default_cert, default_key
-            );
-            let mut unit = File::create("/etc/systemd/system/cichlid.service")
-                .expect("Failed to write /etc/systemd/system/cichlid.service -- need root?");
-            unit.write_all(systemd_unit.as_bytes())
-                .expect("Failed to write systemd file");
-
-            // 6. Reload systemd and enable service
-            let _ = Command::new("systemctl").args(&["daemon-reload"]).status();
-            let _ = Command::new("systemctl")
-                .args(&["enable", "--now", "cichlid.service"])
-                .status();
-
-            println!(
-                "Cichlid installed, system user, sudoers, binary, cert/key, and service set up."
-            );
+            install::install(*overwrite)?;
             return Ok(());
         }
         Some(Command::Uninstall { purge }) => {
-            use std::process::Command;
-            use std::fs;
-            // Check root
-            if unsafe { libc::geteuid() } != 0 {
-                eprintln!("Uninstall must be run as root (e.g., with sudo)");
-                std::process::exit(1);
-            }
-
-            // Stop and disable the service
-            let _ = Command::new("systemctl").args(&["stop", "cichlid.service"]).status();
-            let _ = Command::new("systemctl").args(&["disable", "cichlid.service"]).status();
-
-            if *purge {
-                // Remove systemd service unit
-                let _ = fs::remove_file("/etc/systemd/system/cichlid.service");
-                let _ = Command::new("systemctl").args(&["daemon-reload"]).status();
-
-                // Remove sudoer file
-                let _ = fs::remove_file("/etc/sudoers.d/cichlid");
-
-                // Remove binary
-                let _ = fs::remove_file("/usr/local/bin/cichlid");
-
-                // Remove config folder and certs
-                let _ = fs::remove_dir_all("/etc/cichlid");
-
-                // Delete user
-                let _ = Command::new("userdel").args(&["-r", "cichlid"]).status();
-
-                println!("Cichlid service, files, user, and config purged.");
-            } else {
-                println!("Cichlid service stopped and disabled. (user, binary, and config left intact)");
-            }
+            install::uninstall(*purge)?;
             return Ok(());
         }
         Some(Command::GenCerts { cert_out, key_out }) => {
@@ -274,7 +117,7 @@ WantedBy=multi-user.target
                 eprintln!("Error: --cert-path and --key-path must not be used with 'gen-certs'");
                 std::process::exit(1);
             }
-            certs::generate_self_signed_cert(cert_out, key_out)?;
+            certs::generate_self_signed_cert(cert_out.as_str(), key_out.as_str())?;
             println!(
                 "Certificates generated at:\n  cert: {}\n  key: {}",
                 cert_out, key_out
@@ -302,7 +145,7 @@ WantedBy=multi-user.target
                     "-new",
                     "-x509",
                     "-newkey",
-                    alg,
+                    alg.as_str(),
                     "-keyout",
                     key_out.to_str().unwrap(),
                     "-out",
