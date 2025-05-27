@@ -61,20 +61,20 @@ pub enum Command {
     /// Generate legacy TLS certificates
     GenCerts {
         /// Path to write the certificate file
-        #[arg(long)]
-        cert_out: String,
+        #[arg(long, help = "Path to TLS certificate file")]
+        cert_path: String,
 
         /// Path to write the private key file
-        #[arg(long)]
-        key_out: String,
+        #[arg(long, help = "Path to TLS private key file")]
+        key_path: String,
     },
 
     /// Generate post-quantum TLS certificates (e.g., Dilithium3)
     GenPqCerts {
-        #[arg(long)]
-        cert_out: PathBuf,
-        #[arg(long)]
-        key_out: PathBuf,
+        #[arg(long, help = "Path to TLS certificate file")]
+        cert_path: PathBuf,
+        #[arg(long, help = "Path to TLS private key file")]
+        key_path: PathBuf,
 
         #[arg(long, value_parser = validate_pq_alg)]
         alg: Option<String>,
@@ -111,22 +111,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             install::uninstall(*purge)?;
             return Ok(());
         }
-        Some(Command::GenCerts { cert_out, key_out }) => {
+        Some(Command::GenCerts { cert_path, key_path }) => {
             // reject --cert-path or --key-path if present
             if args.cert_path.is_some() || args.key_path.is_some() {
                 eprintln!("Error: --cert-path and --key-path must not be used with 'gen-certs'");
                 std::process::exit(1);
             }
-            certs::generate_self_signed_cert(cert_out.as_str(), key_out.as_str())?;
+            certs::generate_self_signed_cert(cert_path.as_str(), key_path.as_str())?;
             println!(
                 "Certificates generated at:\n  cert: {}\n  key: {}",
-                cert_out, key_out
+                cert_path, key_path
             );
             return Ok(());
         }
         Some(Command::GenPqCerts {
-            cert_out,
-            key_out,
+            cert_path,
+            key_path,
             alg,
         }) => {
             let alg = match alg {
@@ -147,9 +147,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "-newkey",
                     alg.as_str(),
                     "-keyout",
-                    key_out.to_str().unwrap(),
+                    key_path.to_str().unwrap(),
                     "-out",
-                    cert_out.to_str().unwrap(),
+                    cert_path.to_str().unwrap(),
                     "-nodes",
                     "-subj",
                     "/CN=localhost",
@@ -170,8 +170,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!(
                 "PQ certificate written to:\n  cert: {}\n  key: {}",
-                cert_out.display(),
-                key_out.display()
+                cert_path.display(),
+                key_path.display()
             );
             return Ok(());
         }
