@@ -18,7 +18,14 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
             // useradd if doesn't exist
             let status = Command::new("useradd")
                 .args(&[
-                    "-r", "-m", "-d", "/var/lib/cichlid", "-G", "wheel", "cichlid"])
+                    "-r",
+                    "-m",
+                    "-d",
+                    "/var/lib/cichlid",
+                    "-G",
+                    "wheel",
+                    "cichlid",
+                ])
                 .status()
                 .expect("failed to create user cichlid");
             if !status.success() {
@@ -39,13 +46,19 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
         file.write_all(sudoers_content.as_bytes())
             .expect("Failed to write sudoers line");
     }
-    let _ = Command::new("chmod").args(&["0440", "/etc/sudoers.d/cichlid"]).status();
+    let _ = Command::new("chmod")
+        .args(&["0440", "/etc/sudoers.d/cichlid"])
+        .status();
 
     // 3. Copy binary to /usr/local/bin/cichlid, stopping service if active and overwrite is required.
     let bin_dest = "/usr/local/bin/cichlid";
-    let exe_path = fs::read_link("/proc/self/exe").expect("Failed to determine running binary location");
+    let exe_path =
+        fs::read_link("/proc/self/exe").expect("Failed to determine running binary location");
     if Path::new(bin_dest).exists() && !overwrite {
-        eprintln!("Binary {} already exists. Use --overwrite to replace.", bin_dest);
+        eprintln!(
+            "Binary {} already exists. Use --overwrite to replace.",
+            bin_dest
+        );
         std::process::exit(1);
     }
     if overwrite {
@@ -54,7 +67,9 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
             .status();
         if let Ok(st) = status {
             if st.success() {
-                let _ = Command::new("systemctl").args(&["stop", "cichlid.service"]).status();
+                let _ = Command::new("systemctl")
+                    .args(&["stop", "cichlid.service"])
+                    .status();
             }
         }
     }
@@ -72,11 +87,14 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cert_exists = Path::new(default_cert).exists();
     let key_exists = Path::new(default_key).exists();
     if (cert_exists || key_exists) && !overwrite {
-        eprintln!("Default cert or key already exists in {}. Use --overwrite to replace.", cert_dir);
+        eprintln!(
+            "Default cert or key already exists at file://{}. Use --overwrite to replace.",
+            cert_dir
+        );
         std::process::exit(1);
     }
     match crate::certs::generate_self_signed_cert(default_cert, default_key) {
-        Ok(_) => println!("Default cert and key generated at {}/", cert_dir),
+        Ok(_) => println!("Default cert and key generated at file://{}", cert_dir),
         Err(e) => {
             eprintln!("Failed to generate default TLS cert/key: {}", e);
             std::process::exit(1);
@@ -84,7 +102,8 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 5. Create or overwrite a systemd unit file pointing to the cert/key
-    let systemd_unit = format!(r#"[Unit]
+    let systemd_unit = format!(
+        r#"[Unit]
 Description=Cichlid Service
 After=network.target
 
@@ -97,17 +116,21 @@ LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target
-"#, default_cert, default_key);
+"#,
+        default_cert, default_key
+    );
     {
         let mut unit = File::create("/etc/systemd/system/cichlid.service")
-            .expect("Failed to write /etc/systemd/system/cichlid.service -- need root?");
+            .expect("Failed to write file:///etc/systemd/system/cichlid.service -- need root?");
         unit.write_all(systemd_unit.as_bytes())
             .expect("Failed to write systemd file");
     }
 
     // 6. Reload systemd and enable/start service
     let _ = Command::new("systemctl").args(&["daemon-reload"]).status();
-    let _ = Command::new("systemctl").args(&["enable", "--now", "cichlid.service"]).status();
+    let _ = Command::new("systemctl")
+        .args(&["enable", "--now", "cichlid.service"])
+        .status();
 
     println!("Cichlid installed, system user, sudoers, binary, cert/key, and service set up.");
     Ok(())
@@ -121,8 +144,12 @@ pub fn uninstall(purge: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Stop and disable the service
-    let _ = Command::new("systemctl").args(&["stop", "cichlid.service"]).status();
-    let _ = Command::new("systemctl").args(&["disable", "cichlid.service"]).status();
+    let _ = Command::new("systemctl")
+        .args(&["stop", "cichlid.service"])
+        .status();
+    let _ = Command::new("systemctl")
+        .args(&["disable", "cichlid.service"])
+        .status();
 
     if purge {
         // Remove systemd service unit
