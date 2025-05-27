@@ -114,11 +114,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::GenCerts { cert_path, key_path }) => {
             // reject --cert-path or --key-path if present
             if args.cert_path.is_some() || args.key_path.is_some() {
-                eprintln!("Error: --cert-path and --key-path must not be used with 'gen-certs'");
+                tracing::error!("Error: --cert-path and --key-path must not be used with 'gen-certs'");
                 std::process::exit(1);
             }
             certs::generate_self_signed_cert(cert_path.as_str(), key_path.as_str())?;
-            println!(
+            tracing::info!(
                 "Certificates generated at:\n  cert: {}\n  key: {}",
                 cert_path, key_path
             );
@@ -132,9 +132,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let alg = match alg {
                 Some(a) => a,
                 None => {
-                    eprintln!("Missing --alg. Available PQ algorithms:\n");
+                    tracing::error!("Missing --alg. Available PQ algorithms:");
                     for a in pq::list_pq_signature_algorithms()? {
-                        println!("  {}", a);
+                        tracing::info!("  {}", a);
                     }
                     std::process::exit(1);
                 }
@@ -161,14 +161,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .status()?;
 
             if !status.success() {
-                eprintln!(
+                tracing::error!(
                     "OpenSSL failed to generate PQ certs with algorithm '{}'",
                     alg
                 );
                 std::process::exit(1);
             }
 
-            println!(
+            tracing::info!(
                 "PQ certificate written to:\n  cert: {}\n  key: {}",
                 cert_path.display(),
                 key_path.display()
@@ -189,13 +189,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Failed to run openssl");
 
             if !output.status.success() {
-                eprintln!("Error: OpenSSL did not complete successfully");
+                tracing::error!("Error: OpenSSL did not complete successfully");
                 std::process::exit(1);
             }
 
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 if let Some(algo) = line.strip_suffix(" @ oqsprovider") {
-                    println!("{}", algo.trim());
+                    tracing::info!("{}", algo.trim());
                 }
             }
 
@@ -204,29 +204,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             // require cert path
             let cert_path = args.cert_path.as_ref().unwrap_or_else(|| {
-                eprintln!("Error: --cert-path is required when no subcommand is given");
+                tracing::error!("Error: --cert-path is required when no subcommand is given");
                 std::process::exit(1);
             });
             if !cert_path.exists() {
-                eprintln!("Error: cert file not found at '{}'", cert_path.display());
+                tracing::error!("Error: cert file not found at '{}'", cert_path.display());
                 std::process::exit(1);
             }
             if fs::metadata(cert_path)?.permissions().readonly() {
-                eprintln!("Error: cert file '{}' is not readable", cert_path.display());
+                tracing::error!("Error: cert file '{}' is not readable", cert_path.display());
                 std::process::exit(1);
             }
 
             // require key path
             let key_path = args.key_path.as_ref().unwrap_or_else(|| {
-                eprintln!("Error: --key-path is required when no subcommand is given");
+                tracing::error!("Error: --key-path is required when no subcommand is given");
                 std::process::exit(1);
             });
             if !key_path.exists() {
-                eprintln!("Error: key file not found at '{}'", key_path.display());
+                tracing::error!("Error: key file not found at '{}'", key_path.display());
                 std::process::exit(1);
             }
             if fs::metadata(key_path)?.permissions().readonly() {
-                eprintln!("Error: key file '{}' is not readable", key_path.display());
+                tracing::error!("Error: key file '{}' is not readable", key_path.display());
                 std::process::exit(1);
             }
         }

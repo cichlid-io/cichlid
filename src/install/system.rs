@@ -7,7 +7,7 @@ use std::process::Command;
 pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Root check
     if unsafe { libc::geteuid() } != 0 {
-        eprintln!("Install must be run as root (e.g., with sudo)");
+        tracing::error!("Install must be run as root (e.g., with sudo)");
         std::process::exit(1);
     }
 
@@ -29,12 +29,12 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
                 .status()
                 .expect("failed to create user cichlid");
             if !status.success() {
-                eprintln!("Failed to create cichlid user");
+                tracing::error!("Failed to create cichlid user");
                 std::process::exit(1);
             }
         }
     } else {
-        eprintln!("User lookup failed.");
+        tracing::error!("User lookup failed.");
         std::process::exit(1);
     }
 
@@ -55,7 +55,7 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
     let exe_path =
         fs::read_link("/proc/self/exe").expect("Failed to determine running binary location");
     if Path::new(bin_dest).exists() && !overwrite {
-        eprintln!(
+        tracing::error!(
             "Binary {} already exists. Use --overwrite to replace.",
             bin_dest
         );
@@ -81,22 +81,22 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
     let default_cert = "/etc/cichlid/cert/default-cert.pem";
     let default_key = "/etc/cichlid/cert/default-key.pem";
     if let Err(e) = fs::create_dir_all(cert_dir) {
-        eprintln!("Failed to create cert directory {}: {}", cert_dir, e);
+        tracing::error!("Failed to create cert directory {}: {}", cert_dir, e);
         std::process::exit(1);
     }
     let cert_exists = Path::new(default_cert).exists();
     let key_exists = Path::new(default_key).exists();
     if (cert_exists || key_exists) && !overwrite {
-        eprintln!(
+        tracing::error!(
             "Default cert or key already exists at file://{}. Use --overwrite to replace.",
             cert_dir
         );
         std::process::exit(1);
     }
     match crate::certs::generate_self_signed_cert(default_cert, default_key) {
-        Ok(_) => println!("Default cert and key generated at file://{}", cert_dir),
+        Ok(_) => tracing::info!("Default cert and key generated at file://{}", cert_dir),
         Err(e) => {
-            eprintln!("Failed to generate default TLS cert/key: {}", e);
+            tracing::error!("Failed to generate default TLS cert/key: {}", e);
             std::process::exit(1);
         }
     }
@@ -132,14 +132,14 @@ WantedBy=multi-user.target
         .args(&["enable", "--now", "cichlid.service"])
         .status();
 
-    println!("Cichlid installed, system user, sudoers, binary, cert/key, and service set up.");
+    tracing::info!("Cichlid installed, system user, sudoers, binary, cert/key, and service set up.");
     Ok(())
 }
 
 /// Run the uninstall flow for cichlid. If `purge` is set, remove everything; otherwise just stop/disable service.
 pub fn uninstall(purge: bool) -> Result<(), Box<dyn std::error::Error>> {
     if unsafe { libc::geteuid() } != 0 {
-        eprintln!("Uninstall must be run as root (e.g., with sudo)");
+        tracing::error!("Uninstall must be run as root (e.g., with sudo)");
         std::process::exit(1);
     }
 
@@ -168,9 +168,9 @@ pub fn uninstall(purge: bool) -> Result<(), Box<dyn std::error::Error>> {
         // Delete user
         let _ = Command::new("userdel").args(&["-r", "cichlid"]).status();
 
-        println!("Cichlid service, files, user, and config purged.");
+        tracing::info!("Cichlid service, files, user, and config purged.");
     } else {
-        println!("Cichlid service stopped and disabled. (user, binary, and config left intact)");
+        tracing::info!("Cichlid service stopped and disabled. (user, binary, and config left intact)");
     }
     Ok(())
 }
