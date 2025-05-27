@@ -6,6 +6,7 @@ mod select_stream_or_shutdown;
 mod server_loop;
 mod tls_accept_stream;
 mod types;
+mod workers;
 
 use clap::{Parser, Subcommand};
 use config_store::{ConfigStore, new_store};
@@ -182,16 +183,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = new_store();
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
 
+    // Set up shutdown handler
     let shutdown_handle = shutdown_notify.clone();
-    task::spawn(async move {
-        signal::ctrl_c().await.expect("failed to listen for ctrl_c");
-        info!("Shutdown requested.");
-        shutdown_handle.notify_waiters();
+    tokio::spawn({
+        let interrupt_handle = shutdown_handle.clone();
+        async move {
+            if let Err(e) = signal::ctrl_c().await {
+                error!("Failed to listen for shutdown signal: {}", e);
+            }
+            interrupt_handle.notify_waiters();
+        }
     });
 
-    if let Err(e) = run_web_server(args, store, shutdown_notify).await {
-        error!("Server error: {}", e);
-    }
+    // Spawn web server as a task
+    let server_handle = tokio::spawn({
+        let args_clone = args.clone();
+        let store_clone = store.clone();
+        let server_shutdown = shutdown_notify.clone();
+        async move {
+            if let Err(e) = run_web_server(args_clone, store_clone, server_shutdown).await {
+                error!("Server error: {}", e);
+            }
+        }
+    });
+
+    // Spawn workers as a task
+    let worker_handle = tokio::spawn({
+        let worker_shutdown_handle = shutdown_notify.clone();
+        async move {
+            workers::run_workers(worker_shutdown_handle).await;
+        }
+    });
+
+    // Wait for both the server and workers to exit
+    let _ = tokio::try_join!(server_handle, worker_handle);
+
     Ok(())
 }
 
