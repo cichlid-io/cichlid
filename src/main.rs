@@ -260,8 +260,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let worker_handle = tokio::spawn({
         let worker_shutdown_handle = shutdown_notify.clone();
+        let worker_port = args.port;
         async move {
-            workers::run_workers(worker_shutdown_handle).await;
+            workers::run_workers(worker_shutdown_handle, worker_port).await;
         }
     });
 

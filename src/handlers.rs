@@ -28,6 +28,16 @@ pub async fn route_request(
     use hyper::Method;
 
     match (req.method(), req.uri().path()) {
+        (&Method::GET, "/health") => {
+            // Compile-time version and build hash, set with env! or option_env!
+            let version = env!("CARGO_PKG_VERSION");
+            let build = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
+            let json = format!(r#"{{ "version": "{}", "build": "{}" }}"#, version, build);
+            Ok(Response::builder()
+                .header("Content-Type", "application/json")
+                .body(Body::from(json))
+                .unwrap())
+        }
         (&Method::GET, "/configs") => {
             let store = config_store.lock().unwrap();
             let json = serde_json::to_string(&*store).unwrap();
