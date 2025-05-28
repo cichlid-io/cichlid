@@ -1,23 +1,32 @@
 use crate::config_store::ConfigStore;
 use crate::types::ConfigItem;
-use hyper::{Body, Request, Response, StatusCode};
 use hyper::server::conn::Http;
 use hyper::service::service_fn;
+use hyper::{Body, Request, Response, StatusCode};
 use tokio::net::TcpStream;
+//use tokio::io::AsyncWriteExt;
 use tokio_openssl::SslStream;
 use tracing::error;
 
-pub async fn handle_tls_connection(
-    stream: SslStream<TcpStream>,
-    config_store: ConfigStore,
-) {
+pub async fn handle_tls_connection(mut stream: SslStream<TcpStream>, config_store: ConfigStore) {
     let service = service_fn(move |req| {
         let store = config_store.clone();
         async move { route_request(req, store).await }
     });
 
-    if let Err(e) = Http::new().serve_connection(stream, service).await {
+    let remote_addr = stream.get_ref().peer_addr().ok();
+
+    let result = Http::new().serve_connection(&mut stream, service).await;
+    if let Err(e) = result {
         error!("TLS connection error: {}", e);
+    }
+    // Ensure shutdown and closure
+    if let Err(e) = tokio::io::AsyncWriteExt::shutdown(stream.get_mut()).await {
+        error!("TLS/TCP shutdown error: {:?}", e);
+    }
+    drop(stream);
+    if let Some(addr) = remote_addr {
+        tracing::info!("TLS connection with {} closed and resources dropped.", addr);
     }
 }
 
@@ -61,33 +70,27 @@ pub async fn route_request(
             }
         }
 
-        (&Method::GET, "/peers") => {
-            match sled::open("peers_db") {
-                Ok(db) => {
-                    let mut peers = vec![];
-                    for res in db.iter() {
-                        if let Ok((_, v)) = res {
-                            if let Ok(rec) = serde_json::from_slice::<crate::workers::PeerRecord>(&v) {
-                                peers.push(rec);
-                            }
+        (&Method::GET, "/peers") => match sled::open("peers_db") {
+            Ok(db) => {
+                let mut peers = vec![];
+                for res in db.iter() {
+                    if let Ok((_, v)) = res {
+                        if let Ok(rec) = serde_json::from_slice::<crate::workers::PeerRecord>(&v) {
+                            peers.push(rec);
                         }
                     }
-                    let json = serde_json::to_string(&peers).unwrap_or_else(|_| "[]".to_string());
-                    Ok(
-                        Response::builder()
-                            .header("Content-Type", "application/json")
-                            .body(Body::from(json))
-                            .unwrap(),
-                    )
                 }
-                Err(_) => Ok(
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::from("{\"error\": \"db not available\"}"))
-                        .unwrap(),
-                ),
+                let json = serde_json::to_string(&peers).unwrap_or_else(|_| "[]".to_string());
+                Ok(Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(json))
+                    .unwrap())
             }
-        }
+            Err(_) => Ok(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("{\"error\": \"db not available\"}"))
+                .unwrap()),
+        },
 
         _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)

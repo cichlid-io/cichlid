@@ -29,10 +29,24 @@ use tracing::{error, info};
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about)]
 struct Args {
-    #[arg(long, help = "Path to TLS certificate file")]
-    cert_path: Option<PathBuf>,
-    #[arg(long, help = "Path to TLS private key file")]
-    key_path: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value = "/etc/cichlid/tls/default/cert.pem",
+        help = "Path to TLS certificate file"
+    )]
+    cert_path: PathBuf,
+    #[arg(
+        long,
+        default_value = "/etc/cichlid/tls/default/key.pem",
+        help = "Path to TLS private key file"
+    )]
+    key_path: PathBuf,
+    #[arg(
+        long,
+        default_value = "/etc/cichlid/tls/default/ca-cert.pem",
+        help = "Path to CA certificate file (for peer verification)"
+    )]
+    ca_cert_path: PathBuf,
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
     #[arg(long, default_value = "29170")]
@@ -40,7 +54,7 @@ struct Args {
     /// Peer discovery interval in seconds
     #[arg(
         long,
-        default_value = "300",
+        default_value = "5",
         help = "Peer discovery interval, in seconds"
     )]
     discovery_interval: u64,
@@ -56,6 +70,20 @@ pub enum Command {
         /// Overwrite existing systemd service file and certs if they exist
         #[arg(long)]
         overwrite: bool,
+        /// Path to TLS certificate file for service (default: /etc/cichlid/tls/default/cert.pem)
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/cert.pem",
+            help = "Path to TLS certificate file"
+        )]
+        cert_path: PathBuf,
+        /// Path to TLS private key file for service (default: /etc/cichlid/tls/default/key.pem)
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/key.pem",
+            help = "Path to TLS private key file"
+        )]
+        key_path: PathBuf,
     },
 
     /// Uninstall cichlid: stop service, optionally remove all files and user
@@ -65,53 +93,68 @@ pub enum Command {
         purge: bool,
     },
 
-    /// Generate legacy TLS certificates
+    /// Generate TLS certificates. If --alg is given and matches a PQ algorithm, generate a PQ certificate.
     GenCerts {
         /// Path to write the certificate file
-        #[arg(long, help = "Path to TLS certificate file")]
-        cert_path: String,
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/cert.pem",
+            help = "Path to TLS certificate file"
+        )]
+        cert_path: PathBuf,
 
         /// Path to write the private key file
-        #[arg(long, help = "Path to TLS private key file")]
-        key_path: String,
-    },
-
-    /// Generate post-quantum TLS certificates (e.g., Dilithium3)
-    GenPqCerts {
-        #[arg(long, help = "Path to TLS certificate file")]
-        cert_path: PathBuf,
-        #[arg(long, help = "Path to TLS private key file")]
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/key.pem",
+            help = "Path to TLS private key file"
+        )]
         key_path: PathBuf,
 
-        #[arg(long, value_parser = validate_pq_alg)]
+        /// Path to CA certificate for signing
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/ca-cert.pem",
+            help = "Path to signing CA certificate"
+        )]
+        ca_cert_path: PathBuf,
+
+        /// Path to CA private key for signing
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/ca-key.pem",
+            help = "Path to signing CA private key"
+        )]
+        ca_key_path: PathBuf,
+        /// Algorithm (PQ or classic) for key/cert generation. If omitted, use normal algorithm.
+        #[arg(long)]
         alg: Option<String>,
     },
 
     /// List PQ algorithms supported by the linked OpenSSL+OQS provider
     ListPqAlgs,
 
-    /// Generate a cichlid self-signed CA certificate and private key (errors if file exists)
+    /// Generate a cichlid CA certificate and private key (errors if file exists). If --alg is given and matches a PQ algorithm, use PQ.
     GenCa {
         /// Path to write the CA certificate file
-        #[arg(long, help = "Path to CA certificate file")]
-        ca_cert_path: String,
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/ca-cert.pem",
+            help = "Path to CA certificate file"
+        )]
+        ca_cert_path: PathBuf,
         /// Path to write the CA private key file
-        #[arg(long, help = "Path to CA private key file")]
-        ca_key_path: String,
+        #[arg(
+            long,
+            default_value = "/etc/cichlid/tls/default/ca-key.pem",
+            help = "Path to CA private key file"
+        )]
+        ca_key_path: PathBuf,
+        /// Algorithm (PQ or classic) for CA key/cert generation. If omitted, use normal algorithm.
+        #[arg(long)]
+        alg: Option<String>,
     },
     // More subcommands could be added here later
-}
-
-fn validate_pq_alg(s: &str) -> Result<String, String> {
-    match pq::list_pq_signature_algorithms() {
-        Ok(list) if list.contains(&s.to_string()) => Ok(s.to_string()),
-        Ok(list) => Err(format!(
-            "Invalid algorithm '{}'. Valid options are:\n  {}",
-            s,
-            list.join("\n  ")
-        )),
-        Err(_) => Err("Could not retrieve PQ algorithms from OpenSSL".into()),
-    }
 }
 
 #[tokio::main]
@@ -120,8 +163,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     match &args.command {
-        Some(Command::Install { overwrite }) => {
-            install::install(*overwrite)?;
+        Some(Command::Install {
+            overwrite,
+            cert_path,
+            key_path,
+        }) => {
+            install::install(*overwrite, cert_path.clone(), key_path.clone())?;
             return Ok(());
         }
         Some(Command::Uninstall { purge }) => {
@@ -131,68 +178,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::GenCerts {
             cert_path,
             key_path,
-        }) => {
-            // reject --cert-path or --key-path if present
-            if args.cert_path.is_some() || args.key_path.is_some() {
-                tracing::error!(
-                    "Error: --cert-path and --key-path must not be used with 'gen-certs'"
-                );
-                std::process::exit(1);
-            }
-            certs::generate_self_signed_cert(cert_path.as_str(), key_path.as_str())?;
-            tracing::info!(
-                "Certificates generated at:\n  cert: {}\n  key: {}",
-                cert_path,
-                key_path
-            );
-            return Ok(());
-        }
-        Some(Command::GenPqCerts {
-            cert_path,
-            key_path,
+            ca_cert_path,
+            ca_key_path,
             alg,
         }) => {
-            let alg = match alg {
-                Some(a) => a,
-                None => {
-                    tracing::error!("Missing --alg. Available PQ algorithms:");
-                    for a in pq::list_pq_signature_algorithms()? {
-                        tracing::info!("  {}", a);
-                    }
-                    std::process::exit(1);
-                }
-            };
-            let status = std::process::Command::new("openssl")
-                .args([
-                    "req",
-                    "-new",
-                    "-x509",
-                    "-newkey",
-                    alg.as_str(),
-                    "-keyout",
-                    key_path.to_str().unwrap(),
-                    "-out",
-                    cert_path.to_str().unwrap(),
-                    "-nodes",
-                    "-subj",
-                    "/CN=localhost",
-                    "-provider",
-                    "default",
-                    "-provider",
-                    "oqsprovider",
-                ])
-                .status()?;
-
-            if !status.success() {
+            // CA cert/key must exist
+            if !ca_cert_path.exists() {
                 tracing::error!(
-                    "OpenSSL failed to generate PQ certs with algorithm '{}'",
-                    alg
+                    "CA certificate file does not exist: {}",
+                    ca_cert_path.display()
                 );
                 std::process::exit(1);
             }
-
+            if !ca_key_path.exists() {
+                tracing::error!(
+                    "CA private key file does not exist: {}",
+                    ca_key_path.display()
+                );
+                std::process::exit(1);
+            }
+            if let Some(alg) = alg.as_ref() {
+                // Is it a PQ algorithm?
+                let is_pq = pq::list_pq_signature_algorithms()?.contains(alg);
+                if is_pq {
+                    certs::generate_pq_cert_signed_by_ca(
+                        cert_path
+                            .to_str()
+                            .expect("Failed to convert cert_path to str"),
+                        key_path
+                            .to_str()
+                            .expect("Failed to convert key_path to str"),
+                        ca_cert_path
+                            .to_str()
+                            .expect("Failed to convert ca_cert_path to str"),
+                        ca_key_path
+                            .to_str()
+                            .expect("Failed to convert ca_key_path to str"),
+                        alg,
+                    )?;
+                    tracing::info!(
+                        "PQ certificate signed by CA and written to:\n  cert: {}\n  key: {}",
+                        cert_path.display(),
+                        key_path.display()
+                    );
+                    return Ok(());
+                }
+            }
+            // Normal (non-PQ) path
+            certs::generate_cert_signed_by_ca(
+                cert_path
+                    .to_str()
+                    .expect("Failed to convert cert_path to str"),
+                key_path
+                    .to_str()
+                    .expect("Failed to convert key_path to str"),
+                ca_cert_path
+                    .to_str()
+                    .expect("Failed to convert ca_cert_path to str"),
+                ca_key_path
+                    .to_str()
+                    .expect("Failed to convert ca_key_path to str"),
+            )?;
             tracing::info!(
-                "PQ certificate written to:\n  cert: {}\n  key: {}",
+                "Certificate signed by CA and written to:\n  cert: {}\n  key: {}",
                 cert_path.display(),
                 key_path.display()
             );
@@ -224,63 +272,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             return Ok(());
         }
-        Some(Command::GenCa { ca_cert_path, ca_key_path }) => {
-            use std::path::Path;
-            use openssl::rsa::Rsa;
-            use openssl::x509::X509NameBuilder;
-            use openssl::pkey::PKey;
-            use openssl::x509::X509Builder;
-            use openssl::asn1::Asn1Time;
-            use openssl::x509::extension::BasicConstraints;
-            use openssl::x509::extension::KeyUsage;
-
+        Some(Command::GenCa {
+            ca_cert_path,
+            ca_key_path,
+            alg,
+        }) => {
             // Error if either file exists
-            if Path::new(&ca_cert_path).exists() || Path::new(&ca_key_path).exists() {
-                tracing::error!("CA cert or key already exists ({} or {}). Aborting.", ca_cert_path, ca_key_path);
+            if ca_cert_path.exists() || ca_key_path.exists() {
+                tracing::error!(
+                    "CA cert or key already exists ({} or {}). Aborting.",
+                    ca_cert_path.display(),
+                    ca_key_path.display()
+                );
                 std::process::exit(1);
             }
-
-            // Generate RSA CA keypair
-            let rsa = Rsa::generate(4096).expect("Failed to generate RSA");
-            let pkey = PKey::from_rsa(rsa).expect("Failed to create CA PKey");
-
-            // Subject/issuer name
-            let mut name = X509NameBuilder::new().unwrap();
-            name.append_entry_by_text("CN", "cichlid-ca").unwrap();
-            let name = name.build();
-
-            // Build self-signed X509 cert
-            let mut builder = X509Builder::new().unwrap();
-            builder.set_version(2).unwrap();
-            builder.set_subject_name(&name).unwrap();
-            builder.set_issuer_name(&name).unwrap();
-            builder.set_pubkey(&pkey).unwrap();
-            builder.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-            builder.set_not_after(&Asn1Time::days_from_now(3650).unwrap()).unwrap(); // 10 years
-            let basic_constraints = BasicConstraints::new().critical().ca().build().unwrap();
-            builder.append_extension(basic_constraints).unwrap();
-            let key_usage = KeyUsage::new().key_cert_sign().crl_sign().build().unwrap();
-            builder.append_extension(key_usage).unwrap();
-            builder.sign(&pkey, openssl::hash::MessageDigest::sha256()).unwrap();
-            let ca_cert = builder.build();
-
-            // Write key and cert to files
-            std::fs::write(&ca_cert_path, ca_cert.to_pem().unwrap()).expect("Failed to write CA cert");
-            std::fs::write(&ca_key_path, pkey.private_key_to_pem_pkcs8().unwrap()).expect("Failed to write CA key");
-
+            if let Some(alg) = alg.as_ref() {
+                // Is it a PQ algorithm?
+                let is_pq = pq::list_pq_signature_algorithms()?.contains(alg);
+                if is_pq {
+                    certs::generate_pq_ca_cert(
+                        ca_cert_path.to_str().unwrap(),
+                        ca_key_path.to_str().unwrap(),
+                        alg,
+                    )?;
+                    tracing::info!(
+                        "PQ CA certificate and key written to:\n  cert: {}\n  key: {}",
+                        ca_cert_path.display(),
+                        ca_key_path.display()
+                    );
+                    return Ok(());
+                }
+            }
+            // Otherwise, generate a normal (non-PQ) CA
+            certs::generate_normal_ca_cert(
+                ca_cert_path.to_str().unwrap(),
+                ca_key_path.to_str().unwrap(),
+            )?;
             tracing::info!(
                 "Generated cichlid CA:\n  cert: {}\n  key: {}",
-                ca_cert_path,
-                ca_key_path
+                ca_cert_path.display(),
+                ca_key_path.display()
             );
             return Ok(());
         }
         None => {
             // require cert path
-            let cert_path = args.cert_path.as_ref().unwrap_or_else(|| {
-                tracing::error!("Error: --cert-path is required when no subcommand is given");
-                std::process::exit(1);
-            });
+            let cert_path = &args.cert_path;
             if !cert_path.exists() {
                 tracing::error!("Error: cert file not found at '{}'", cert_path.display());
                 std::process::exit(1);
@@ -291,10 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // require key path
-            let key_path = args.key_path.as_ref().unwrap_or_else(|| {
-                tracing::error!("Error: --key-path is required when no subcommand is given");
-                std::process::exit(1);
-            });
+            let key_path = &args.key_path;
             if !key_path.exists() {
                 tracing::error!("Error: key file not found at '{}'", key_path.display());
                 std::process::exit(1);
@@ -357,10 +391,15 @@ async fn run_web_server(
     info!("Listening on https://{}", addr);
 
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    let cert_path = args.cert_path.as_ref().expect("cert_path required");
-    let key_path = args.key_path.as_ref().expect("key_path required");
+    let cert_path = &args.cert_path;
+    let key_path = &args.key_path;
+    let ca_cert_path = &args.ca_cert_path;
     builder.set_certificate_chain_file(cert_path)?;
     builder.set_private_key_file(key_path, SslFiletype::PEM)?;
+    // Set CA cert for peer cert verification
+    builder.set_ca_file(ca_cert_path)?;
+    use openssl::ssl::SslVerifyMode;
+    builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
     let ssl_acceptor = Arc::new(builder.build());
 
     //let stream: Pin<Box<dyn Stream<Item = Result<SslStream<TcpStream>, std::io::Error>> + Send>> = Box::pin(tls_accept_stream(tcp, ssl_acceptor.clone()));

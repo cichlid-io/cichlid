@@ -4,7 +4,13 @@ use std::path::Path;
 use std::process::Command;
 
 /// Run the install flow for cichlid, returning Ok(()) on success, or printing errors and exiting on failure.
-pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
+use std::path::PathBuf;
+
+pub fn install(
+    overwrite: bool,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Root check
     if unsafe { libc::geteuid() } != 0 {
         tracing::error!("Install must be run as root (e.g., with sudo)");
@@ -61,7 +67,7 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(1);
     }
-    if overwrite {
+    if Path::new(bin_dest).exists() && overwrite {
         let status = Command::new("systemctl")
             .args(&["is-active", "--quiet", "cichlid.service"])
             .status();
@@ -73,31 +79,43 @@ pub fn install(overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Always copy binary (overwrite if necessary).
     fs::copy(&exe_path, bin_dest)
         .expect("Failed to copy binary to /usr/local/bin/cichlid -- need root?");
 
-    // 4. Make /etc/cichlid/cert and generate default cert/key
-    let cert_dir = "/etc/cichlid/cert";
-    let default_cert = "/etc/cichlid/cert/default-cert.pem";
-    let default_key = "/etc/cichlid/cert/default-key.pem";
+    // 4. Make cert directory and generate cert/key at provided paths
+    if cert_path.as_os_str().is_empty() || key_path.as_os_str().is_empty() {
+        tracing::error!("cert_path and key_path must be provided to install(); no default is set internally.");
+        std::process::exit(1);
+    }
+    let cert_dir = cert_path.parent().unwrap_or_else(|| {
+        tracing::error!("Failed to determine cert directory from cert_path: '{}'", cert_path.display());
+        std::process::exit(1);
+    });
     if let Err(e) = fs::create_dir_all(cert_dir) {
-        tracing::error!("Failed to create cert directory {}: {}", cert_dir, e);
+        tracing::error!("Failed to create cert directory {}: {}", cert_dir.display(), e);
         std::process::exit(1);
     }
-    let cert_exists = Path::new(default_cert).exists();
-    let key_exists = Path::new(default_key).exists();
-    if (cert_exists || key_exists) && !overwrite {
-        tracing::error!(
-            "Default cert or key already exists at file://{}. Use --overwrite to replace.",
-            cert_dir
+
+    let cert_exists = cert_path.exists();
+    let key_exists = key_path.exists();
+    if cert_exists || key_exists {
+        tracing::info!(
+            "Cert and/or key already exist at cert: file://{}, key: file://{}; not overwriting.",
+            cert_path.display(),
+            key_path.display()
         );
-        std::process::exit(1);
-    }
-    match crate::certs::generate_self_signed_cert(default_cert, default_key) {
-        Ok(_) => tracing::info!("Default cert and key generated at file://{}", cert_dir),
-        Err(e) => {
-            tracing::error!("Failed to generate default TLS cert/key: {}", e);
-            std::process::exit(1);
+    } else {
+        match crate::certs::generate_self_signed_cert(cert_path.to_str().unwrap(), key_path.to_str().unwrap()) {
+            Ok(_) => tracing::info!(
+                "Cert and key generated at\n  cert: file://{}\n  key: file://{}",
+                cert_path.display(),
+                key_path.display()
+            ),
+            Err(e) => {
+                tracing::error!("Failed to generate TLS cert/key: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 
@@ -117,7 +135,7 @@ LimitNOFILE=4096
 [Install]
 WantedBy=multi-user.target
 "#,
-        default_cert, default_key
+        cert_path.display(), key_path.display()
     );
     {
         let mut unit = File::create("/etc/systemd/system/cichlid.service")

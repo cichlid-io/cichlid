@@ -1,3 +1,4 @@
+use get_if_addrs::get_if_addrs;
 use hyper::{Body, Client};
 use hyper_openssl::HttpsConnector;
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,6 @@ use std::{
 };
 use tokio::{sync::Notify, time};
 use tracing::{info, trace};
-use get_if_addrs::get_if_addrs;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PeerRecord {
@@ -92,7 +92,7 @@ pub async fn run_workers(shutdown: Arc<Notify>, port: u16, discovery_interval: u
 }
 
 async fn discover_and_track_cichlid(addr: SocketAddr, peer_db: sled::Db) {
-    info!("ping {}:{}", addr.ip(), addr.port());
+    trace!("ping {}:{}", addr.ip(), addr.port());
     let url = format!("https://{}:{}/health", addr.ip(), addr.port());
     let https = match HttpsConnector::new() {
         Ok(conn) => conn,
