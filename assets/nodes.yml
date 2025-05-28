@@ -1,0 +1,13 @@
+---
+- hostname: quadbrat
+  domain: thgttg.com
+  ip:
+    private: 10.49.0.10
+  ssh:
+    alias: quadbrat
+- hostname: gramathea
+  domain: thgttg.com
+  ip:
+    private: 10.49.1.101
+  ssh:
+    alias: gramathea

@@ -106,7 +106,13 @@ pub fn install(
             key_path.display()
         );
     } else {
-        match crate::certs::generate_self_signed_cert(cert_path.to_str().unwrap(), key_path.to_str().unwrap()) {
+        // Default SANs: localhost and 127.0.0.1; in practice, allow setting via args/env/config as desired.
+        let subject_names = &["localhost", "127.0.0.1"];
+        match crate::certs::generate_self_signed_cert(
+            cert_path.to_str().unwrap(),
+            key_path.to_str().unwrap(),
+            subject_names,
+        ) {
             Ok(_) => tracing::info!(
                 "Cert and key generated at\n  cert: file://{}\n  key: file://{}",
                 cert_path.display(),

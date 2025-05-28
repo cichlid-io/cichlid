@@ -126,9 +126,14 @@ pub enum Command {
             help = "Path to signing CA private key"
         )]
         ca_key_path: PathBuf,
+
         /// Algorithm (PQ or classic) for key/cert generation. If omitted, use normal algorithm.
         #[arg(long)]
         alg: Option<String>,
+
+        /// Subject names for the certificate SAN (DNS/IP). Multiple allowed: --subject-name name1 --subject-name name2
+        #[arg(long = "subject-name", action = clap::ArgAction::Append)]
+        subject_names: Vec<String>,
     },
 
     /// List PQ algorithms supported by the linked OpenSSL+OQS provider
@@ -181,6 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ca_cert_path,
             ca_key_path,
             alg,
+            subject_names,
         }) => {
             // CA cert/key must exist
             if !ca_cert_path.exists() {
@@ -197,6 +203,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 std::process::exit(1);
             }
+
+            // Fallback to generic names if none supplied.
+            let names: Vec<String> = if subject_names.is_empty() {
+                vec!["localhost".to_string(), "127.0.0.1".to_string()]
+            } else {
+                subject_names.clone()
+            };
+            let subject_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+
             if let Some(alg) = alg.as_ref() {
                 // Is it a PQ algorithm?
                 let is_pq = pq::list_pq_signature_algorithms()?.contains(alg);
@@ -215,6 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .to_str()
                             .expect("Failed to convert ca_key_path to str"),
                         alg,
+                        &subject_refs,
                     )?;
                     tracing::info!(
                         "PQ certificate signed by CA and written to:\n  cert: {}\n  key: {}",
@@ -238,6 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ca_key_path
                     .to_str()
                     .expect("Failed to convert ca_key_path to str"),
+                &subject_refs,
             )?;
             tracing::info!(
                 "Certificate signed by CA and written to:\n  cert: {}\n  key: {}",
