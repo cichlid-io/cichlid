@@ -387,8 +387,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let worker_shutdown_handle = shutdown_notify.clone();
         let worker_port = args.port;
         let discovery_interval = args.discovery_interval;
+        let cert_path = args.cert_path.clone();
+        let key_path = args.key_path.clone();
+        let ca_cert_path = args.ca_cert_path.clone();
         async move {
-            workers::run_workers(worker_shutdown_handle, worker_port, discovery_interval).await;
+            workers::run_workers(
+                worker_shutdown_handle,
+                worker_port,
+                discovery_interval,
+                cert_path,
+                key_path,
+                ca_cert_path,
+            ).await;
         }
     });
 

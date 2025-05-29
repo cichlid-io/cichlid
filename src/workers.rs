@@ -1,4 +1,5 @@
 use get_if_addrs::get_if_addrs;
+use hyper::client::HttpConnector;
 use hyper::{Body, Client};
 use hyper_openssl::HttpsConnector;
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Notify, time};
-use tracing::{info, trace};
+use tracing::{error, info, trace};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PeerRecord {
@@ -18,11 +19,48 @@ pub struct PeerRecord {
     pub last_observed: i64,
 }
 
-pub async fn run_workers(shutdown: Arc<Notify>, port: u16, discovery_interval: u64) {
+pub async fn run_workers(
+    shutdown: Arc<Notify>,
+    port: u16,
+    discovery_interval: u64,
+    cert_path: std::path::PathBuf,
+    key_path: std::path::PathBuf,
+    ca_cert_path: std::path::PathBuf,
+) {
     info!("Worker runtime started");
 
     // Open sled db for peers
     let peer_db = sled::open("peers_db").expect("Failed to open sled DB");
+
+    // Build SslConnectorBuilder ONCE and share for all peer scan tasks
+    let ssl_builder = match {
+        let mut ssl = SslConnector::builder(SslMethod::tls());
+        if let Err(e) = &ssl {
+            tracing::error!("Failed to create SslConnector builder: {}", e);
+        }
+        ssl.and_then(|mut s| {
+            if let Err(e) = s.set_certificate_chain_file(&cert_path) {
+                tracing::error!("Failed to set cert chain file: {}", e);
+                return Err(e);
+            }
+            if let Err(e) = s.set_private_key_file(&key_path, SslFiletype::PEM) {
+                tracing::error!("Failed to set private key file: {}", e);
+                return Err(e);
+            }
+            if let Err(e) = s.set_ca_file(&ca_cert_path) {
+                tracing::error!("Failed to set ca cert file: {}", e);
+                return Err(e);
+            }
+            s.set_verify(SslVerifyMode::PEER);
+            Ok(s)
+        })
+    } {
+        Ok(ssl) => std::sync::Arc::new(ssl),
+        Err(_) => {
+            error!("Peer discovery TLS setup failed, not starting worker mTLS client");
+            return;
+        }
+    };
 
     // Spawn network discovery worker
     let _build = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
@@ -31,13 +69,14 @@ pub async fn run_workers(shutdown: Arc<Notify>, port: u16, discovery_interval: u
     // Spawn peer discovery as a detached background task
     tokio::spawn({
         let shutdown = shutdown.clone();
+        let ssl_builder = ssl_builder.clone();
         async move {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(discovery_interval)) => {
                         info!("Worker: performing background peer discovery...");
                         // Run peer discovery every cycle using get_if_addrs for subnet detection
-                        let mut peer_scan_tasks = Vec::new();
+                        let mut peer_scan_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
                         match get_if_addrs() {
                             Ok(addrs) => {
                                 for iface in addrs.into_iter() {
@@ -66,7 +105,13 @@ pub async fn run_workers(shutdown: Arc<Notify>, port: u16, discovery_interval: u
                                             if candidate_ip == ipv4 { continue; }
                                             let addr = SocketAddr::new(IpAddr::V4(candidate_ip), port);
                                             let peer_db = peer_db.clone();
-                                            peer_scan_tasks.push(tokio::spawn(discover_and_track_cichlid(addr, peer_db)));
+                                            peer_scan_tasks.push(tokio::spawn(discover_and_track_cichlid(
+                                                addr,
+                                                peer_db,
+                                                cert_path.clone(),
+                                                key_path.clone(),
+                                                ca_cert_path.clone(),
+                                            )));
                                         }
                                     }
                                 }
@@ -91,16 +136,45 @@ pub async fn run_workers(shutdown: Arc<Notify>, port: u16, discovery_interval: u
     info!("Worker runtime exited");
 }
 
-async fn discover_and_track_cichlid(addr: SocketAddr, peer_db: sled::Db) {
+use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
+
+async fn discover_and_track_cichlid(
+    addr: SocketAddr,
+    peer_db: sled::Db,
+    cert_path: std::path::PathBuf,
+    key_path: std::path::PathBuf,
+    ca_cert_path: std::path::PathBuf,
+) {
     trace!("ping {}:{}", addr.ip(), addr.port());
     let url = format!("https://{}:{}/health", addr.ip(), addr.port());
-    let https = match HttpsConnector::new() {
-        Ok(conn) => conn,
-        Err(_) => {
-            trace!("Failed to create HTTPS connector");
+
+    // Build SslConnectorBuilder for each connection (hyper-openssl 0.9.x API)
+    let mut ssl_builder = match SslConnector::builder(SslMethod::tls()) {
+        Ok(b) => b,
+        Err(e) => {
+            trace!("Failed to create SslConnector builder: {}", e);
             return;
         }
     };
+    if let Err(e) = ssl_builder.set_certificate_chain_file(&cert_path) {
+        trace!("Failed to set cert chain file: {}", e);
+        return;
+    }
+    if let Err(e) = ssl_builder.set_private_key_file(&key_path, SslFiletype::PEM) {
+        trace!("Failed to set private key file: {}", e);
+        return;
+    }
+    if let Err(e) = ssl_builder.set_ca_file(&ca_cert_path) {
+        trace!("Failed to set ca cert file: {}", e);
+        return;
+    }
+    ssl_builder.set_verify(SslVerifyMode::PEER);
+
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+
+    let https = HttpsConnector::with_connector(http, ssl_builder)
+        .expect("Failed to create HttpsConnector with client key/cert/ca");
     let client: Client<_, Body> = Client::builder().build(https);
 
     let req = match hyper::Request::get(&url).body(Body::empty()) {
@@ -161,7 +235,7 @@ async fn discover_and_track_cichlid(addr: SocketAddr, peer_db: sled::Db) {
             }
         }
         _ => {
-            trace!("No response from {}", addr.ip());
+            trace!("No healthy response from {}", addr.ip());
         }
     }
 }
