@@ -75,7 +75,7 @@ pub async fn route_request(
                 let mut peers = vec![];
                 for res in db.iter() {
                     if let Ok((_, v)) = res {
-                        if let Ok(rec) = serde_json::from_slice::<crate::workers::PeerRecord>(&v) {
+                        if let Ok(rec) = serde_json::from_slice::<crate::peers::PeerRecord>(&v) {
                             peers.push(rec);
                         }
                     }

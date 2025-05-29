@@ -2,6 +2,7 @@ mod certs;
 mod config_store;
 mod handlers;
 mod install;
+mod peers;
 mod pq;
 mod select_stream_or_shutdown;
 mod server_loop;
@@ -398,7 +399,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cert_path,
                 key_path,
                 ca_cert_path,
-            ).await;
+            )
+            .await;
         }
     });
 
