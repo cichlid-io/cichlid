@@ -12,6 +12,7 @@ pub async fn run_workers(
     shutdown: Arc<Notify>,
     port: u16,
     discovery_interval: u64,
+    peer_db: Arc<sled::Db>,
     cert_path: std::path::PathBuf,
     key_path: std::path::PathBuf,
     ca_cert_path: std::path::PathBuf,
@@ -27,10 +28,10 @@ pub async fn run_workers(
     builder.set_ca_file(&ca_cert_path).unwrap();
     builder.set_verify(SslVerifyMode::PEER);
     let ssl = Arc::new(builder.build());
-    let peer_db = sled::open("peers_db").expect("Failed to open sled DB");
 
     tokio::spawn({
         let ssl = ssl.clone();
+        let peer_db = peer_db.clone();
         let shutdown = shutdown.clone();
         async move {
             loop {
@@ -68,7 +69,7 @@ pub async fn run_workers(
     shutdown.notified().await;
 }
 
-async fn discover_and_track_cichlid(addr: SocketAddr, peer_db: sled::Db, ssl: Arc<SslConnector>) {
+async fn discover_and_track_cichlid(addr: SocketAddr, peer_db: Arc<sled::Db>, ssl: Arc<SslConnector>) {
     use std::pin::Pin;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -121,15 +122,66 @@ async fn discover_and_track_cichlid(addr: SocketAddr, peer_db: sled::Db, ssl: Ar
             health: health_json,
             last_observed: now,
         };
-        if let Ok(val) = serde_json::to_vec(&new_record) {
-            let _ = peer_db.insert(&key, val);
+
+        let previous: Option<PeerRecord> = peer_db
+            .get(&key)
+            .ok()
+            .and_then(|val| val.and_then(|v| serde_json::from_slice(&v).ok()));
+
+        match serde_json::to_vec(&new_record) {
+            Ok(val) => match peer_db.insert(&key, val) {
+                Ok(Some(prev_val)) => {
+                    if let Ok(old_rec) = serde_json::from_slice::<PeerRecord>(&prev_val) {
+                        if old_rec.health == new_record.health {
+                            info!(
+                                "Discovered UPDATED cichlid at {}:{} -- health: {}",
+                                addr.ip(),
+                                addr.port(),
+                                new_record.health
+                            );
+                        } else {
+                            info!(
+                                "Discovered CHANGED cichlid at {}:{} -- old health: {} -- new health: {}",
+                                addr.ip(),
+                                addr.port(),
+                                old_rec.health,
+                                new_record.health
+                            );
+                        }
+                    } else {
+                        info!(
+                            "Discovered UPDATED cichlid at {}:{} (could not decode previous value)",
+                            addr.ip(),
+                            addr.port()
+                        );
+                    }
+                }
+                Ok(None) => {
+                    info!(
+                        "Discovered NEW cichlid at {}:{} -- health: {}",
+                        addr.ip(),
+                        addr.port(),
+                        new_record.health
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to persist peer (sled insert) {}:{}: {}",
+                        addr.ip(),
+                        addr.port(),
+                        e
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::error!(
+                    "Failed to serialize PeerRecord for {}:{}: {}",
+                    addr.ip(),
+                    addr.port(),
+                    e
+                );
+            }
         }
-        info!(
-            "Discovered NEW cichlid at {}:{} -- health: {}",
-            addr.ip(),
-            addr.port(),
-            new_record.health
-        );
     } else {
         trace!("No health/peer at {}: {:?}", addr, response);
     }

@@ -52,6 +52,9 @@ if [[ "$*" == *"--overwrite-ca-cert"* || "$*" == *"--overwrite-local-cert"* || !
         echo "- file://${local_default_key_path}"
     fi
 fi
+if systemctl is-active cichlid.service; then
+    sudo systemctl stop cichlid.service
+fi
 sudo ~/git/cichlid/cichlid/target/release/cichlid install --overwrite
 
 for hostname in "${hosts[@]}"; do
@@ -112,6 +115,11 @@ for hostname in "${hosts[@]}"; do
 
     # install cichlid (will not overwrite cert/key!)
     if rsync --archive --compress --quiet ~/git/cichlid/cichlid/target/release/cichlid ${ssh_alias}:/tmp/cichlid \
+        && ssh ${ssh_alias} "
+            if systemctl is-active cichlid.service; then
+                sudo systemctl stop cichlid.service
+            fi
+        " \
         && ssh ${ssh_alias} "sudo /tmp/cichlid install --overwrite && sudo setfacl -m u:cichlid:r /etc/cichlid/tls/default/key.pem && rm /tmp/cichlid"; then
         echo "cichlid installed on node: ${hostname}"
     else

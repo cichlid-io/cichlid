@@ -16,6 +16,7 @@ use config_store::{ConfigStore, new_store};
 use handlers::handle_tls_connection;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use server_loop::serve_tls_stream;
+use sled;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -168,6 +169,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
+    // Open sled peer DB ONCE as Arc, share globally
+    let peer_db =
+        Arc::new(sled::open("/var/lib/cichlid/peers_db").expect("Failed to open sled DB"));
+
     match &args.command {
         Some(Command::Install {
             overwrite,
@@ -181,6 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             install::uninstall(*purge)?;
             return Ok(());
         }
+
         Some(Command::GenCerts {
             cert_path,
             key_path,
@@ -189,22 +195,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             alg,
             subject_names,
         }) => {
-            // CA cert/key must exist
-            if !ca_cert_path.exists() {
-                tracing::error!(
-                    "CA certificate file does not exist: {}",
-                    ca_cert_path.display()
-                );
-                std::process::exit(1);
-            }
-            if !ca_key_path.exists() {
-                tracing::error!(
-                    "CA private key file does not exist: {}",
-                    ca_key_path.display()
-                );
-                std::process::exit(1);
-            }
-
             // Fallback to generic names if none supplied.
             let names: Vec<String> = if subject_names.is_empty() {
                 vec!["localhost".to_string(), "127.0.0.1".to_string()]
@@ -218,18 +208,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let is_pq = pq::list_pq_signature_algorithms()?.contains(alg);
                 if is_pq {
                     certs::generate_pq_cert_signed_by_ca(
-                        cert_path
-                            .to_str()
-                            .expect("Failed to convert cert_path to str"),
-                        key_path
-                            .to_str()
-                            .expect("Failed to convert key_path to str"),
-                        ca_cert_path
-                            .to_str()
-                            .expect("Failed to convert ca_cert_path to str"),
-                        ca_key_path
-                            .to_str()
-                            .expect("Failed to convert ca_key_path to str"),
+                        cert_path.to_str().unwrap(),
+                        key_path.to_str().unwrap(),
+                        ca_cert_path.to_str().unwrap(),
+                        ca_key_path.to_str().unwrap(),
                         alg,
                         &subject_refs,
                     )?;
@@ -243,18 +225,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // Normal (non-PQ) path
             certs::generate_cert_signed_by_ca(
-                cert_path
-                    .to_str()
-                    .expect("Failed to convert cert_path to str"),
-                key_path
-                    .to_str()
-                    .expect("Failed to convert key_path to str"),
-                ca_cert_path
-                    .to_str()
-                    .expect("Failed to convert ca_cert_path to str"),
-                ca_key_path
-                    .to_str()
-                    .expect("Failed to convert ca_key_path to str"),
+                cert_path.to_str().unwrap(),
+                key_path.to_str().unwrap(),
+                ca_cert_path.to_str().unwrap(),
+                ca_key_path.to_str().unwrap(),
                 &subject_refs,
             )?;
             tracing::info!(
@@ -287,7 +261,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracing::info!("{}", algo.trim());
                 }
             }
-
             return Ok(());
         }
         Some(Command::GenCa {
@@ -344,7 +317,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!("Error: cert file '{}' is not readable", cert_path.display());
                 std::process::exit(1);
             }
-
             // require key path
             let key_path = &args.key_path;
             if !key_path.exists() {
@@ -355,59 +327,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!("Error: key file '{}' is not readable", key_path.display());
                 std::process::exit(1);
             }
+
+            let store = new_store();
+            let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+
+            let shutdown_handle = shutdown_notify.clone();
+            tokio::spawn({
+                let interrupt_handle = shutdown_handle.clone();
+                async move {
+                    if let Err(e) = signal::ctrl_c().await {
+                        error!("Failed to listen for shutdown signal: {}", e);
+                    }
+                    interrupt_handle.notify_one();
+                }
+            });
+
+            // Spawn web server as a task
+            let server_handle = tokio::spawn({
+                let args_clone = args.clone();
+                let store_clone = store.clone();
+                let server_shutdown = shutdown_notify.clone();
+                let peer_db = peer_db.clone();
+                async move {
+                    if let Err(e) = run_web_server(args_clone, store_clone, server_shutdown).await {
+                        error!("Server error: {}", e);
+                    }
+                }
+            });
+
+            let worker_handle = tokio::spawn({
+                let worker_shutdown_handle = shutdown_notify.clone();
+                let worker_port = args.port;
+                let discovery_interval = args.discovery_interval;
+                let cert_path = args.cert_path.clone();
+                let key_path = args.key_path.clone();
+                let ca_cert_path = args.ca_cert_path.clone();
+                let peer_db = peer_db.clone();
+                async move {
+                    workers::run_workers(
+                        worker_shutdown_handle,
+                        worker_port,
+                        discovery_interval,
+                        peer_db,
+                        cert_path,
+                        key_path,
+                        ca_cert_path,
+                    )
+                    .await;
+                }
+            });
+
+            // Wait for both the server and workers to exit
+            let _ = tokio::try_join!(server_handle, worker_handle);
+
+            Ok(())
         }
     }
-
-    let store = new_store();
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-
-    let shutdown_handle = shutdown_notify.clone();
-    tokio::spawn({
-        let interrupt_handle = shutdown_handle.clone();
-        async move {
-            if let Err(e) = signal::ctrl_c().await {
-                error!("Failed to listen for shutdown signal: {}", e);
-            }
-            interrupt_handle.notify_waiters();
-        }
-    });
-
-    // Spawn web server as a task
-    let server_handle = tokio::spawn({
-        let args_clone = args.clone();
-        let store_clone = store.clone();
-        let server_shutdown = shutdown_notify.clone();
-        async move {
-            if let Err(e) = run_web_server(args_clone, store_clone, server_shutdown).await {
-                error!("Server error: {}", e);
-            }
-        }
-    });
-
-    let worker_handle = tokio::spawn({
-        let worker_shutdown_handle = shutdown_notify.clone();
-        let worker_port = args.port;
-        let discovery_interval = args.discovery_interval;
-        let cert_path = args.cert_path.clone();
-        let key_path = args.key_path.clone();
-        let ca_cert_path = args.ca_cert_path.clone();
-        async move {
-            workers::run_workers(
-                worker_shutdown_handle,
-                worker_port,
-                discovery_interval,
-                cert_path,
-                key_path,
-                ca_cert_path,
-            )
-            .await;
-        }
-    });
-
-    // Wait for both the server and workers to exit
-    let _ = tokio::try_join!(server_handle, worker_handle);
-
-    Ok(())
 }
 
 async fn run_web_server(
