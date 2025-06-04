@@ -13,7 +13,7 @@ mod workers;
 use crate::types::GenericBoxedStream;
 use clap::{Parser, Subcommand};
 use config_store::{ConfigStore, new_store};
-use handlers::handle_tls_connection;
+
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use server_loop::serve_tls_stream;
 use sled;
@@ -421,7 +421,7 @@ async fn run_web_server(
                 match stream_result {
                     Ok(mut stream) => {
                         use hyper::service::service_fn;
-                        use hyper::{Request, Body, Response};
+
                         let service = service_fn(move |req| {
                             let store = store.clone();
                             let peer_db = peer_db.clone();

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio_openssl::SslStream;
-use tracing::{info, trace};
+use tracing::info;
 
 pub async fn run_workers(
     shutdown: Arc<Notify>,
@@ -149,7 +149,7 @@ async fn discover_and_track_cichlid(
     // New robust HTTP parsing for /health
     let now = chrono::Utc::now().timestamp();
     let mut found_200 = false;
-    let mut found_version = false;
+    // let mut found_version = false; // removed to silence unused assignment
     let mut json_start = None;
 
     for (i, line) in response.lines().enumerate() {
@@ -162,7 +162,7 @@ async fn discover_and_track_cichlid(
     }
     if let Some(start) = json_start {
         let json = &response[start..];
-        found_version = json.contains("version");
+        let found_version = json.contains("version");
         if found_200 && found_version {
             let key = format!("{}:{}", addr.ip(), addr.port());
             let health_json = json.to_string();

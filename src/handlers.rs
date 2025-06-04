@@ -1,43 +1,6 @@
 use crate::config_store::ConfigStore;
 use crate::types::ConfigItem;
-use hyper::server::conn::Http;
-use hyper::service::service_fn;
 use hyper::{Body, Request, Response, StatusCode};
-use tokio::net::TcpStream;
-//use tokio::io::AsyncWriteExt;
-use tokio_openssl::SslStream;
-use tracing::error;
-
-pub async fn handle_tls_connection(
-    mut stream: SslStream<TcpStream>,
-    config_store: ConfigStore,
-    peer_db: Arc<sled::Db>,
-) {
-    let service = service_fn({
-        let store = config_store.clone();
-        let peer_db = peer_db.clone();
-        move |req| {
-            let store = store.clone();
-            let peer_db = peer_db.clone();
-            async move { route_request(req, store, peer_db).await }
-        }
-    });
-
-    let remote_addr = stream.get_ref().peer_addr().ok();
-
-    let result = Http::new().serve_connection(&mut stream, service).await;
-    if let Err(e) = result {
-        error!("TLS connection error: {}", e);
-    }
-    // Ensure shutdown and closure
-    if let Err(e) = tokio::io::AsyncWriteExt::shutdown(stream.get_mut()).await {
-        error!("TLS/TCP shutdown error: {:?}", e);
-    }
-    drop(stream);
-    if let Some(addr) = remote_addr {
-        tracing::info!("TLS connection with {} closed and resources dropped.", addr);
-    }
-}
 
 use std::sync::Arc;
 
@@ -96,7 +59,7 @@ pub async fn route_request(
                 .header("Content-Type", "application/json")
                 .body(Body::from(json))
                 .unwrap())
-        },
+        }
 
         _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
