@@ -169,10 +169,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    // Open sled peer DB ONCE as Arc, share globally
-    let peer_db =
-        Arc::new(sled::open("/var/lib/cichlid/peers_db").expect("Failed to open sled DB"));
-
     match &args.command {
         Some(Command::Install {
             overwrite,
@@ -342,6 +338,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
+            // Open sled peer DB ONCE as Arc, share globally
+            let peer_db =
+                Arc::new(sled::open("/var/lib/cichlid/peers_db").expect("Failed to open sled DB"));
+
             // Spawn web server as a task
             let server_handle = tokio::spawn({
                 let args_clone = args.clone();
@@ -349,7 +349,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let server_shutdown = shutdown_notify.clone();
                 let peer_db = peer_db.clone();
                 async move {
-                    if let Err(e) = run_web_server(args_clone, store_clone, server_shutdown, peer_db.clone()).await {
+                    if let Err(e) =
+                        run_web_server(args_clone, store_clone, server_shutdown, peer_db.clone())
+                            .await
+                    {
                         error!("Server error: {}", e);
                     }
                 }

@@ -8,6 +8,7 @@ default_ca_cert_path=/etc/cichlid/tls/default/ca-cert.pem
 default_ca_key_path=/etc/cichlid/tls/default/ca-key.pem
 local_default_cert_path=/etc/cichlid/tls/default/cert.pem
 local_default_key_path=/etc/cichlid/tls/default/key.pem
+db_path=/var/lib/cichlid/peers_db
 
 if [[ "$*" == *"--overwrite-ca-cert"* || ! -f ${default_ca_cert_path} || ! -f ${default_ca_key_path} ]]; then
     for pem in ${default_ca_cert_path} ${default_ca_key_path}; do
@@ -55,6 +56,8 @@ fi
 if systemctl is-active cichlid.service; then
     sudo systemctl stop cichlid.service
 fi
+sudo rm -rf ${db_path}
+#sudo -u cichlid mkdir ${db_path}
 sudo ~/git/cichlid/cichlid/target/release/cichlid install --overwrite
 
 if ! sudo firewall-cmd --list-ports --permanent | grep ${port}/tcp; then
@@ -127,19 +130,25 @@ for hostname in "${hosts[@]}"; do
             if systemctl is-active cichlid.service; then
                 sudo systemctl stop cichlid.service
             fi
+            sudo rm -rf ${db_path}
+            #sudo -u cichlid mkdir ${db_path}
         " \
         && ssh ${ssh_alias} "sudo /tmp/cichlid install --overwrite && sudo setfacl -m u:cichlid:r /etc/cichlid/tls/default/key.pem && rm /tmp/cichlid"; then
         echo "cichlid installed on node: ${hostname}"
     else
         echo "failed to install cichlid on node: ${hostname}"
     fi
-    if ssh ${ssh_alias} "sudo firewall-cmd \
-        --zone=$(firewall-cmd --get-default-zone) \
-        --add-port=${port}/tcp \
-        --permanent \
-        && sudo firewall-cmd --reload"; then
-        echo "firewall exception added for cichlid (${port}/tcp) on node: ${hostname}"
+    if ssh ${ssh_alias} 'sudo firewall-cmd --zone=$(firewall-cmd --get-default-zone) --list-ports --permanent' | grep ${port}/tcp; then
+        echo "observed firewall exception for cichlid (${port}/tcp) on node: ${hostname}"
     else
-        echo "failed to add firewall exception for cichlid (${port}/tcp) on node: ${hostname}"
+        if ssh ${ssh_alias} "sudo firewall-cmd \
+            --zone=\$(firewall-cmd --get-default-zone) \
+            --add-port=${port}/tcp \
+            --permanent \
+            && sudo firewall-cmd --reload"; then
+            echo "firewall exception added for cichlid (${port}/tcp) on node: ${hostname}"
+        else
+            echo "failed to add firewall exception for cichlid (${port}/tcp) on node: ${hostname}"
+        fi
     fi
 done
