@@ -57,6 +57,14 @@ if systemctl is-active cichlid.service; then
 fi
 sudo ~/git/cichlid/cichlid/target/release/cichlid install --overwrite
 
+if ! sudo firewall-cmd --list-ports --permanent | grep ${port}/tcp; then
+    sudo firewall-cmd \
+        --zone=$(firewall-cmd --get-default-zone) \
+        --add-port=${port}/tcp \
+        --permanent
+    sudo firewall-cmd --reload
+fi
+
 for hostname in "${hosts[@]}"; do
     if [ "${hostname}" = "$(hostname -s)" ]; then
         continue
@@ -126,7 +134,7 @@ for hostname in "${hosts[@]}"; do
         echo "failed to install cichlid on node: ${hostname}"
     fi
     if ssh ${ssh_alias} "sudo firewall-cmd \
-        --zone=FedoraServer \
+        --zone=$(firewall-cmd --get-default-zone) \
         --add-port=${port}/tcp \
         --permanent \
         && sudo firewall-cmd --reload"; then
