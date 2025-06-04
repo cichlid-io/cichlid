@@ -349,7 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let server_shutdown = shutdown_notify.clone();
                 let peer_db = peer_db.clone();
                 async move {
-                    if let Err(e) = run_web_server(args_clone, store_clone, server_shutdown).await {
+                    if let Err(e) = run_web_server(args_clone, store_clone, server_shutdown, peer_db.clone()).await {
                         error!("Server error: {}", e);
                     }
                 }
@@ -389,6 +389,7 @@ async fn run_web_server(
     args: Args,
     store: ConfigStore,
     shutdown_notify: Arc<tokio::sync::Notify>,
+    peer_db: Arc<sled::Db>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", args.host, args.port);
     let tcp = TcpListener::bind(&addr).await?;
@@ -410,18 +411,33 @@ async fn run_web_server(
     let stream: GenericBoxedStream<Result<SslStream<TcpStream>, std::io::Error>> =
         Box::pin(tls_accept_stream(tcp, ssl_acceptor.clone()));
 
-    serve_tls_stream(stream, shutdown_notify.clone(), move |stream_result| {
+    serve_tls_stream(stream, shutdown_notify.clone(), {
         let store = store.clone();
-        task::spawn(async move {
-            match stream_result {
-                Ok(stream) => {
-                    handle_tls_connection(stream, store).await;
+        let peer_db = peer_db.clone();
+        move |stream_result| {
+            let store = store.clone();
+            let peer_db = peer_db.clone();
+            task::spawn(async move {
+                match stream_result {
+                    Ok(mut stream) => {
+                        use hyper::service::service_fn;
+                        use hyper::{Request, Body, Response};
+                        let service = service_fn(move |req| {
+                            let store = store.clone();
+                            let peer_db = peer_db.clone();
+                            async move { handlers::route_request(req, store, peer_db.clone()).await }
+                        });
+                        use hyper::server::conn::Http;
+                        if let Err(e) = Http::new().serve_connection(&mut stream, service).await {
+                            tracing::error!("TLS connection error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("TLS stream error during connection: {}", e);
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("TLS stream error during connection: {}", e);
-                }
-            }
-        })
+            })
+        }
     })
     .await?;
 

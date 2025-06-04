@@ -8,10 +8,19 @@ use tokio::net::TcpStream;
 use tokio_openssl::SslStream;
 use tracing::error;
 
-pub async fn handle_tls_connection(mut stream: SslStream<TcpStream>, config_store: ConfigStore) {
-    let service = service_fn(move |req| {
+pub async fn handle_tls_connection(
+    mut stream: SslStream<TcpStream>,
+    config_store: ConfigStore,
+    peer_db: Arc<sled::Db>,
+) {
+    let service = service_fn({
         let store = config_store.clone();
-        async move { route_request(req, store).await }
+        let peer_db = peer_db.clone();
+        move |req| {
+            let store = store.clone();
+            let peer_db = peer_db.clone();
+            async move { route_request(req, store, peer_db).await }
+        }
     });
 
     let remote_addr = stream.get_ref().peer_addr().ok();
@@ -30,9 +39,12 @@ pub async fn handle_tls_connection(mut stream: SslStream<TcpStream>, config_stor
     }
 }
 
+use std::sync::Arc;
+
 pub async fn route_request(
     req: Request<Body>,
     config_store: ConfigStore,
+    peer_db: Arc<sled::Db>,
 ) -> Result<Response<Body>, hyper::Error> {
     use hyper::Method;
 
@@ -70,26 +82,20 @@ pub async fn route_request(
             }
         }
 
-        (&Method::GET, "/peers") => match sled::open("peers_db") {
-            Ok(db) => {
-                let mut peers = vec![];
-                for res in db.iter() {
-                    if let Ok((_, v)) = res {
-                        if let Ok(rec) = serde_json::from_slice::<crate::peers::PeerRecord>(&v) {
-                            peers.push(rec);
-                        }
+        (&Method::GET, "/peers") => {
+            let mut peers = vec![];
+            for res in peer_db.iter() {
+                if let Ok((_, v)) = res {
+                    if let Ok(rec) = serde_json::from_slice::<crate::peers::PeerRecord>(&v) {
+                        peers.push(rec);
                     }
                 }
-                let json = serde_json::to_string(&peers).unwrap_or_else(|_| "[]".to_string());
-                Ok(Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(json))
-                    .unwrap())
             }
-            Err(_) => Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("{\"error\": \"db not available\"}"))
-                .unwrap()),
+            let json = serde_json::to_string(&peers).unwrap_or_else(|_| "[]".to_string());
+            Ok(Response::builder()
+                .header("Content-Type", "application/json")
+                .body(Body::from(json))
+                .unwrap())
         },
 
         _ => Ok(Response::builder()
