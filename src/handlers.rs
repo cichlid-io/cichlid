@@ -11,6 +11,11 @@ pub async fn route_request(
 ) -> Result<Response<Body>, hyper::Error> {
     use hyper::Method;
 
+    // Determine mTLS status of the CURRENT request
+    let current_request_mtls_ok = req.extensions()
+        .get::<crate::types::ClientAuthStatus>() // Ensure correct path
+        .map_or(false, |status| status.cert_presented && status.cert_verified_ok);
+
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/health") => {
             let version = env!("CARGO_PKG_VERSION");
@@ -64,34 +69,46 @@ pub async fn route_request(
 
         (&Method::GET, "/peers") => {
             use serde_json::Value;
-            let mut peers = vec![];
+            let mut peers_response_list = vec![]; // Build a list of JSON Values for the response
+
             for res in peer_db.iter() {
-                if let Ok((_, v)) = res {
-                    if let Ok(rec) = serde_json::from_slice::<crate::peers::PeerRecord>(&v) {
-                        // Parse health as object if possible
-                        if let Ok(obj) = serde_json::from_str::<Value>(&rec.health) {
-                            let mut map = serde_json::Map::new();
-                            map.insert("ip".to_owned(), Value::String(rec.ip));
-                            map.insert("port".to_owned(), Value::Number(rec.port.into()));
-                            map.insert("health".to_owned(), obj);
-                            map.insert("last_observed".to_owned(), Value::Number(rec.last_observed.into()));
-                            peers.push(Value::Object(map));
-                        } else {
-                            // Fallback: leave as raw string if parse failed
-                            let mut map = serde_json::Map::new();
-                            map.insert("ip".to_owned(), Value::String(rec.ip));
-                            map.insert("port".to_owned(), Value::Number(rec.port.into()));
-                            map.insert("health".to_owned(), Value::String(rec.health));
-                            map.insert("last_observed".to_owned(), Value::Number(rec.last_observed.into()));
-                            peers.push(Value::Object(map));
+                if let Ok((_key, sled_value)) = res {
+                    if let Ok(peer_record) = serde_json::from_slice::<crate::peers::PeerRecord>(&sled_value) {
+                        // Try to parse the persisted health string into a JSON Value
+                        match serde_json::from_str::<Value>(&peer_record.health) {
+                            Ok(mut health_obj) => { // health_obj is now a mutable Value, likely an Object
+                                if !current_request_mtls_ok {
+                                    // If current request is not mTLS authenticated, remove uuid from this peer's health
+                                    if let Some(obj_map) = health_obj.as_object_mut() {
+                                        obj_map.remove("uuid");
+                                    }
+                                }
+                                // Construct the peer object for the response list
+                                let mut response_peer_map = serde_json::Map::new();
+                                response_peer_map.insert("ip".to_string(), Value::String(peer_record.ip));
+                                response_peer_map.insert("port".to_string(), Value::Number(peer_record.port.into()));
+                                response_peer_map.insert("health".to_string(), health_obj); // health_obj might have had uuid removed
+                                response_peer_map.insert("last_observed".to_string(), Value::Number(peer_record.last_observed.into()));
+                                peers_response_list.push(Value::Object(response_peer_map));
+                            }
+                            Err(_) => {
+                                // Health string wasn't valid JSON, include it as a string, or handle error
+                                // For simplicity, let's just create a basic representation
+                                let mut response_peer_map = serde_json::Map::new();
+                                response_peer_map.insert("ip".to_string(), Value::String(peer_record.ip));
+                                response_peer_map.insert("port".to_string(), Value::Number(peer_record.port.into()));
+                                response_peer_map.insert("health".to_string(), Value::String("Error parsing health data".to_string())); // Or include raw string
+                                response_peer_map.insert("last_observed".to_string(), Value::Number(peer_record.last_observed.into()));
+                                peers_response_list.push(Value::Object(response_peer_map));
+                            }
                         }
                     }
                 }
             }
-            let json = serde_json::to_string(&peers).unwrap_or_else(|_| "[]".to_string());
+            let json_body = serde_json::to_string(&peers_response_list).unwrap_or_else(|_| "[]".to_string());
             Ok(Response::builder()
                 .header("Content-Type", "application/json")
-                .body(Body::from(json))
+                .body(Body::from(json_body))
                 .unwrap())
         }
 
