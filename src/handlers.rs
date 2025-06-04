@@ -46,11 +46,28 @@ pub async fn route_request(
         }
 
         (&Method::GET, "/peers") => {
+            use serde_json::Value;
             let mut peers = vec![];
             for res in peer_db.iter() {
                 if let Ok((_, v)) = res {
                     if let Ok(rec) = serde_json::from_slice::<crate::peers::PeerRecord>(&v) {
-                        peers.push(rec);
+                        // Parse health as object if possible
+                        if let Ok(obj) = serde_json::from_str::<Value>(&rec.health) {
+                            let mut map = serde_json::Map::new();
+                            map.insert("ip".to_owned(), Value::String(rec.ip));
+                            map.insert("port".to_owned(), Value::Number(rec.port.into()));
+                            map.insert("health".to_owned(), obj);
+                            map.insert("last_observed".to_owned(), Value::Number(rec.last_observed.into()));
+                            peers.push(Value::Object(map));
+                        } else {
+                            // Fallback: leave as raw string if parse failed
+                            let mut map = serde_json::Map::new();
+                            map.insert("ip".to_owned(), Value::String(rec.ip));
+                            map.insert("port".to_owned(), Value::Number(rec.port.into()));
+                            map.insert("health".to_owned(), Value::String(rec.health));
+                            map.insert("last_observed".to_owned(), Value::Number(rec.last_observed.into()));
+                            peers.push(Value::Object(map));
+                        }
                     }
                 }
             }
