@@ -13,13 +13,30 @@ pub async fn route_request(
 
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/health") => {
-            // Compile-time version and build hash, set with env! or option_env!
             let version = env!("CARGO_PKG_VERSION");
             let build = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
-            let json = format!(r#"{{ "version": "{}", "build": "{}" }}"#, version, build);
+            let mut health_data = serde_json::json!({
+                "version": version,
+                "build": build,
+            });
+
+            // Check for client certificate from SslStream in request extensions
+            // Check for client certificate from ClientAuthStatus in request extensions
+            if let Some(auth_status) = req.extensions().get::<crate::types::ClientAuthStatus>() {
+                if auth_status.cert_presented && auth_status.cert_verified_ok {
+                // In a real system, fetch this from /etc/machine-id or similar
+                let system_uuid = std::fs::read_to_string("/etc/machine-id")
+                    .unwrap_or_else(|_| "unknown-uuid".to_string())
+                    .trim()
+                    .to_string();
+                health_data["uuid"] = serde_json::json!(system_uuid);
+                }
+            }
+
+            let json_body = serde_json::to_string(&health_data).unwrap();
             Ok(Response::builder()
                 .header("Content-Type", "application/json")
-                .body(Body::from(json))
+                .body(Body::from(json_body))
                 .unwrap())
         }
         (&Method::GET, "/configs") => {

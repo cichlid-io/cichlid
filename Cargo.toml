@@ -18,7 +18,7 @@ chrono = "0.4"
 
 # web + tls
 hyper = { version = "0.14", features = ["full"] }
-openssl = { version = "0.10", features = ["v111"] }
+openssl = { version = "0.10.60", features = ["v111"] }
 hyper-openssl = { git = "https://github.com/sfackler/hyper-openssl", tag = "0.10.2" }
 tokio-openssl = "0.6"
 

@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
-use futures_util::Stream;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+use futures_util::Stream;
+use std::pin::Pin;
+
+// Ensure ConfigItem is defined and public
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ConfigItem {
     pub id: String,
     pub server_ip: String,
@@ -11,5 +13,12 @@ pub struct ConfigItem {
     pub commands: Vec<String>,
 }
 
-/// Generic boxed stream type for any item.
+// New type for client authentication status
+#[derive(Clone, Debug)]
+pub struct ClientAuthStatus {
+    pub cert_presented: bool,
+    pub cert_verified_ok: bool,
+}
+
+// Ensure GenericBoxedStream type alias is public
 pub type GenericBoxedStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;

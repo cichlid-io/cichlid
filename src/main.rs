@@ -4,17 +4,19 @@ mod handlers;
 mod install;
 mod peers;
 mod pq;
+// mod types; // Removed duplicate, original is at the top
 mod select_stream_or_shutdown;
 mod server_loop;
 mod tls_accept_stream;
 mod types;
 mod workers;
 
+use crate::config_store::{ConfigStore, new_store};
 use crate::types::GenericBoxedStream;
 use clap::{Parser, Subcommand};
-use config_store::{ConfigStore, new_store};
 
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+use openssl; // Added for openssl::x509::X509VerifyResult
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod}; // Removed X509VerifyResult from here
 use server_loop::serve_tls_stream;
 use sled;
 use std::fs;
@@ -407,7 +409,7 @@ async fn run_web_server(
     // Set CA cert for peer cert verification
     builder.set_ca_file(ca_cert_path)?;
     use openssl::ssl::SslVerifyMode;
-    builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    builder.set_verify(SslVerifyMode::PEER); // Request a client cert, verify if sent, but don't fail if missing/untrusted.
     let ssl_acceptor = Arc::new(builder.build());
 
     //let stream: Pin<Box<dyn Stream<Item = Result<SslStream<TcpStream>, std::io::Error>> + Send>> = Box::pin(tls_accept_stream(tcp, ssl_acceptor.clone()));
@@ -422,10 +424,45 @@ async fn run_web_server(
             let peer_db = peer_db.clone();
             task::spawn(async move {
                 match stream_result {
-                    Ok(mut stream) => {
-                        use hyper::service::service_fn;
+                    Ok(mut stream) => { // stream is SslStream<TcpStream>
+                        // Extract client cert status BEFORE passing stream to Hyper
+                        let client_auth_status = {
+                            let ssl_ref = stream.ssl();
+                            let peer_cert = ssl_ref.peer_certificate();
+                            let verify_result = ssl_ref.verify_result();
 
-                        let service = service_fn(move |req| {
+                            // Detailed logging for debugging client cert presentation
+                            tracing::info!("Incoming connection: Peer cert presented: {}", peer_cert.is_some());
+                            if let Some(cert) = &peer_cert {
+                                let subject_name_ref = cert.subject_name();
+                                let subject_name_str = subject_name_ref.entries().fold(String::new(), |acc, e| {
+                                    acc + &format!("/{}={}", e.object().nid().short_name().unwrap_or("?"), String::from_utf8_lossy(e.data().as_slice()))
+                                });
+                                tracing::info!("Presented peer cert subject: {}", subject_name_str);
+
+                                let issuer_name_ref = cert.issuer_name();
+                                let issuer_name_str = issuer_name_ref.entries().fold(String::new(), |acc, e| {
+                                    acc + &format!("/{}={}", e.object().nid().short_name().unwrap_or("?"), String::from_utf8_lossy(e.data().as_slice()))
+                                });
+                                tracing::info!("Presented peer cert issuer: {}", issuer_name_str);
+                            }
+                            tracing::info!("Incoming connection: Verify result: {:?}", verify_result);
+
+                            crate::types::ClientAuthStatus {
+                                cert_presented: peer_cert.is_some(),
+                                cert_verified_ok: match verify_result {
+                                    openssl::x509::X509VerifyResult::OK => true,
+                                    _ => false,
+                                },
+                            }
+                        };
+                        tracing::info!("Determined Client Auth Status for incoming connection: {:?}", client_auth_status);
+
+                        use hyper::service::service_fn;
+                        let service = service_fn(move |mut req| { // req is Request<Body>
+                            // Insert our extracted status into request extensions
+                            req.extensions_mut().insert(client_auth_status.clone());
+
                             let store = store.clone();
                             let peer_db = peer_db.clone();
                             async move { handlers::route_request(req, store, peer_db.clone()).await }

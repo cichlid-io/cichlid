@@ -56,7 +56,7 @@ fi
 if systemctl is-active cichlid.service; then
     sudo systemctl stop cichlid.service
 fi
-sudo rm -rf ${db_path}
+#sudo rm -rf ${db_path}
 #sudo -u cichlid mkdir ${db_path}
 sudo ~/git/cichlid/cichlid/target/release/cichlid install --overwrite
 
@@ -130,7 +130,7 @@ for hostname in "${hosts[@]}"; do
             if systemctl is-active cichlid.service; then
                 sudo systemctl stop cichlid.service
             fi
-            sudo rm -rf ${db_path}
+            #sudo rm -rf ${db_path}
             #sudo -u cichlid mkdir ${db_path}
         " \
         && ssh ${ssh_alias} "sudo /tmp/cichlid install --overwrite && sudo setfacl -m u:cichlid:r /etc/cichlid/tls/default/key.pem && rm /tmp/cichlid"; then
